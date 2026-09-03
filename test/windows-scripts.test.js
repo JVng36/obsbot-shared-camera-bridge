@@ -58,6 +58,18 @@ test("GitHub CI exposes the plugin package to Python discovery", () => {
   );
 });
 
+test("Hermes Plugin Doctor CI installs an immutable source revision", () => {
+  const workflow = read(".github/workflows/ci.yml");
+  assert.match(
+    workflow,
+    /Install pinned Hermes Agent[\s\S]*?python -m pip install --editable "git\+https:\/\/github\.com\/NousResearch\/hermes-agent\.git@[0-9a-f]{40}#egg=hermes-agent"/,
+  );
+  assert.match(
+    workflow,
+    /Validate plugin against runtime contracts[\s\S]*?SHARED_CAMERA_URL:\s*http:\/\/127\.0\.0\.1:8766[\s\S]*?SHARED_CAMERA_AGENT:\s*agent_a[\s\S]*?hermes plugins doctor clients\/hermes-plugin --ci/,
+  );
+});
+
 test("Windows CI executes the prompt editor against production-shaped loopback responses", () => {
   const workflow = read(".github/workflows/ci.yml");
   const integration = read("test/Invoke-WindowsEditorIntegration.ps1");

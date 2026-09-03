@@ -74,8 +74,8 @@ Start with `docs/SETUP.md`, then read `docs/OPERATIONS.md` before the first live
 
 ## Verification status
 
-- Current generalized v0.2 tree: 104/104 Node tests and 19/19 Python client/plugin tests passed; Plugin Doctor registered exactly 10 tools and 0 hooks.
+- Current generalized v0.2 tree: 105/105 Node tests and 19/19 Python client/plugin tests passed; Plugin Doctor registered exactly 10 tools and 0 hooks.
 - All production PowerShell scripts passed the Windows PowerShell parser on a real Windows host without starting the bridge or touching the camera. The prompt editor also passed a disposable Windows PowerShell 5.1 integration test over IPv4 and IPv6 loopback with production-sized timestamps.
 - The hardening patch applied cleanly to a fresh checkout of the pinned adapter. Its TypeScript build and 586/586 upstream tests passed, and its production dependency audit reported zero findings.
-- GitHub CI repeats the bridge/client suites on Windows and Linux, runs Plugin Doctor against the current Hermes Agent package, and reconstructs plus compiles the Windows native helper on a fresh Windows runner.
+- GitHub CI repeats the bridge/client suites on Windows and Linux, runs Plugin Doctor against a pinned Hermes Agent source revision that carries the documented Doctor command, and reconstructs plus compiles the Windows native helper on a fresh Windows runner.
 - The same policy core previously passed supervised physical-camera acceptance in one private deployment. That result does not transfer automatically. Every new host, camera model, adapter update, or material hardware change requires the supervised checklist in `docs/SETUP.md`.

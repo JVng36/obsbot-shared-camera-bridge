@@ -96,19 +96,23 @@ class PluginRegistrationTests(unittest.TestCase):
             client = plugin._get_client()
         self.assertEqual(client._expected_agent, "desk-cam_01")
         self.assertEqual(client._base_url, "http://100.64.0.10:8766")
-        self.assertEqual(str(client._token_file), "/tmp/agent-camera-token")
+        self.assertEqual(client._token_file, Path("/tmp/agent-camera-token"))
 
-        with patch.dict(
-            "os.environ",
-            {
-                "SHARED_CAMERA_URL": "http://127.0.0.1:8766",
-                "SHARED_CAMERA_AGENT": "ops",
-            },
-            clear=True,
-        ):
-            client = plugin._get_client()
+        with patch.object(plugin.Path, "home", return_value=Path("/synthetic-home")):
+            with patch.dict(
+                "os.environ",
+                {
+                    "SHARED_CAMERA_URL": "http://127.0.0.1:8766",
+                    "SHARED_CAMERA_AGENT": "ops",
+                },
+                clear=True,
+            ):
+                client = plugin._get_client()
         self.assertEqual(client._expected_agent, "ops")
-        self.assertEqual(client._token_file, Path.home() / ".config" / "shared-camera" / "token")
+        self.assertEqual(
+            client._token_file,
+            Path("/synthetic-home") / ".config" / "shared-camera" / "token",
+        )
 
     def test_plugin_rejects_normalized_or_mistyped_agent_identity(self):
         plugin = load_plugin()
@@ -117,6 +121,7 @@ class PluginRegistrationTests(unittest.TestCase):
             {
                 "SHARED_CAMERA_URL": "http://127.0.0.1:8766",
                 "SHARED_CAMERA_AGENT": "Agent_A",
+                "SHARED_CAMERA_TOKEN_FILE": "/tmp/invalid-agent-token",
             },
             clear=True,
         ):
