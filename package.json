@@ -1,0 +1,15 @@
+{
+  "name": "obsbot-shared-camera-bridge",
+  "version": "0.2.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Privacy-first OBSBOT camera extension for Hermes Agent with explicit finite sessions, local vision, and text-only results",
+  "scripts": {
+    "test": "node --test test/auth.test.js test/bridge-look.test.js test/bridge-prompt.test.js test/bridge-ptz.test.js test/bridge-stop.test.js test/config.test.js test/observation-text.test.js test/obsbot-device.test.js test/prompt-store.test.js test/runtime.test.js test/session.test.js && node --test test/http-prompt.test.js test/http-server.test.js test/main.test.js test/ollama-vision.test.js test/windows-scripts.test.js test/vendor-bootstrap.test.js",
+    "test:coverage": "node --test --experimental-test-coverage"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

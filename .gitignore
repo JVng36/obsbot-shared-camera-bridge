@@ -1,0 +1,45 @@
+# Private runtime configuration and credentials
+secrets.json
+secrets.json.*
+*.token
+.env
+.env.*
+!.env.example
+
+# Raw or derived media must never enter this repository
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.bmp
+*.mp4
+*.mov
+*.webm
+*.avi
+*.wav
+*.mp3
+
+# Locally fetched or generated dependencies
+vendor/obsbot-mcp/
+node_modules/
+dist/
+build/
+coverage/
+
+# Caches and logs
+__pycache__/
+*.py[cod]
+*.log
+.cache/
+
+# Deployment leftovers
+backups/
+*-backup/
+*-backups/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

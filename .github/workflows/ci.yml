@@ -1,0 +1,87 @@
+---
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge-and-client-tests:
+    name: Bridge and client tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: '3.12'
+      - name: Run Node bridge tests
+        run: npm test
+      - name: Run Python client and plugin tests
+        env:
+          PYTHONPATH: clients/hermes-plugin
+        run: python -m unittest discover -s clients/hermes-plugin/tests -p "test_*.py" -v
+      - name: Parse PowerShell scripts
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ParseErrors = @()
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $Tokens = $null
+            $Errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$Tokens,
+              [ref]$Errors
+            ) | Out-Null
+            $ParseErrors += $Errors
+          }
+          if ($ParseErrors.Count -gt 0) {
+            $ParseErrors | ForEach-Object { Write-Error $_.ToString() }
+            exit 1
+          }
+      - name: Exercise the Windows prompt editor boundary
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\test\Invoke-WindowsEditorIntegration.ps1
+
+  vendor-reconstruction:
+    name: Reconstruct pinned Windows adapter
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '24'
+      - name: Clone, audit, test, and build the pinned adapter
+        shell: powershell
+        run: |
+          .\scripts\Install-ObsbotAdapter.ps1 -Destination "$env:RUNNER_TEMP\obsbot-mcp"
+
+  hermes-plugin-doctor:
+    name: Hermes Plugin Doctor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: '3.12'
+      - name: Install current Hermes Agent
+        run: python -m pip install hermes-agent
+      - name: Validate plugin against runtime contracts
+        run: hermes plugins doctor clients/hermes-plugin --ci

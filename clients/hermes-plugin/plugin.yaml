@@ -1,0 +1,21 @@
+---
+name: shared-camera
+version: 0.2.0
+description: "Privacy-first OBSBOT camera extension for Hermes Agent with explicit finite sessions and text-only results."
+author: Shared Camera Bridge
+requires_env:
+  - SHARED_CAMERA_URL
+  - SHARED_CAMERA_AGENT
+optional_env:
+  - SHARED_CAMERA_TOKEN_FILE
+provides_tools:
+  - shared_camera_status
+  - shared_camera_look
+  - shared_camera_move
+  - shared_camera_recenter
+  - shared_camera_stop
+  - shared_camera_prompt_status
+  - shared_camera_prompt_get
+  - shared_camera_prompt_replace
+  - shared_camera_prompt_append
+  - shared_camera_prompt_reset

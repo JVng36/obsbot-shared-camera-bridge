@@ -1,0 +1,30 @@
+{
+  "forbidden": [
+    "data:image/jpeg;base64,PRIVATE_RAW_IMAGE_PAYLOAD",
+    "data:text/plain,PRIVATE_DATA_URL_MARKER",
+    "data:application/octet-stream;base64,QUJDRA==",
+    "blob:http://example.invalid/private-frame",
+    "MEDIA:/tmp/private-frame.jpg",
+    "file:///tmp/private-frame.jpg",
+    "Open http://example.invalid/private-frame",
+    "ftp://example.invalid/private-frame.jpg",
+    "cid:private-frame@example.invalid",
+    "\\\\server\\share\\private-frame.jpg",
+    "//server/share/private-frame.jpg",
+    "/opt/private/private-frame.jpg",
+    "/Users/user/private-frame.jpg",
+    "../private-frame.jpg",
+    "..\\private-frame.jpg",
+    "./private/private-frame.jpg",
+    ".\\private\\private-frame.jpg",
+    "C:\\private\\private-frame.jpg",
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "base64url_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-___"
+  ],
+  "allowed": [
+    "A person is seated near a mesh-backed chair.",
+    "A blue folder and two mugs are visible.",
+    "The display shows a ratio of 1/2.",
+    "The scene is lit from the left side."
+  ]
+}
