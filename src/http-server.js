@@ -181,6 +181,7 @@ const RESPONSE_SCHEMAS = {
       ptzLeaseHolder: isNullableText,
       ptzLeaseExpiresAtMs: isNullableNumber,
       parked: isBool,
+      parkingVerification: (value) => value === "unverified",
       promptRevision: isInt,
       promptUpdatedAtMs: isNumber,
       promptUpdatedBy: isPromptActor,

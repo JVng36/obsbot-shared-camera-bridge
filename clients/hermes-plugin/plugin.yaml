@@ -6,7 +6,6 @@ author: Shared Camera Bridge
 requires_env:
   - SHARED_CAMERA_URL
   - SHARED_CAMERA_AGENT
-optional_env:
   - SHARED_CAMERA_TOKEN_FILE
 provides_tools:
   - shared_camera_status

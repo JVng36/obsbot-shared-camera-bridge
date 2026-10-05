@@ -1,13 +1,17 @@
 # Shared Camera Operations
 
+For the manual Linux adaptation, use [LINUX.md](LINUX.md), including its native
+hardware and client identity deployment gates.
+
+
 ## Installed paths
 
 - Bridge: `<bridge-root>`
 - Visible launcher: `<bridge-root>/Start Shared Camera.cmd`
 - Agent plugin: configure per Hermes profile, for example `~/.hermes/plugins/shared-camera`
-- Agent token: `$SHARED_CAMERA_TOKEN_FILE`, or the fallback `~/.config/shared-camera/token`
+- Agent token: the explicit profile-scoped `$SHARED_CAMERA_TOKEN_FILE`; no shared-home fallback
 
-Each agent must set `SHARED_CAMERA_URL` and `SHARED_CAMERA_AGENT` explicitly. Do not ship private host or identity defaults with the plugin.
+Each agent must set `SHARED_CAMERA_URL`, `SHARED_CAMERA_AGENT`, and `SHARED_CAMERA_TOKEN_FILE` explicitly in its own profile. Do not ship private host or identity defaults with the plugin.
 
 ## Start a session
 

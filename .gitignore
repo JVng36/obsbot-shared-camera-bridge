@@ -38,6 +38,17 @@ backups/
 *-backup/
 *-backups/
 
+# Private work notes, handoffs, and operational observations
+.*.md
+*HANDOFF*.md
+*_REPORT.md
+*CONTINUATION*.md
+evidence/
+findings.md
+progress.md
+task_plan.md
+config/*.json
+
 # Editors and operating systems
 .vscode/
 .idea/

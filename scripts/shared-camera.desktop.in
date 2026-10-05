@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Start shared camera (finite session)
+Comment=Confirm camera consent in a visible terminal; Ctrl+C stops
+Terminal=true
+Exec="@APP_ROOT@/scripts/start-shared-camera.sh" --config "@CONFIG_PATH@" --vendor-root "@VENDOR_ROOT@" --node "@NODE_PATH@"
+Categories=Utility;

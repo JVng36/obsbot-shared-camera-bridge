@@ -20,6 +20,30 @@ function isAllowedBindHost(host) {
   return octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127;
 }
 
+export function validateVisionControls(vision) {
+  let endpoint;
+  try { endpoint = new URL(vision.baseUrl); } catch { throw new Error("invalid local vision endpoint"); }
+  if (endpoint.protocol !== "http:" || !["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname.toLowerCase()) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== "/") {
+    throw new Error("local vision endpoint must be an HTTP loopback origin without credentials or suffixes");
+  }
+  if (typeof vision.model !== "string" || !vision.model.trim() || vision.model.length > 200) {
+    throw new Error("local vision model must contain 1 to 200 characters");
+  }
+  for (const [key, max] of [["num_ctx", 32768], ["num_predict", 1000]]) {
+    if (vision[key] !== undefined && (!Number.isInteger(vision[key]) || vision[key] < 1 || vision[key] > max)) {
+      throw new Error(`local vision ${key} is outside its integer bounds`);
+    }
+  }
+  const residency = vision.keep_alive;
+  if (residency !== undefined) {
+    const match = typeof residency === "string" && /^([1-9][0-9]*)(s|m)$/.exec(residency);
+    const seconds = match ? Number(match[1]) * (match[2] === "m" ? 60 : 1) : residency;
+    if (typeof seconds !== "number" || !Number.isInteger(seconds) || seconds < 0 || seconds > 120) {
+      throw new Error("local vision keep_alive must be 0 to 120 seconds or a bounded s/m duration");
+    }
+  }
+}
+
 export function validateRuntimeConfig(input) {
   if (!input || typeof input !== "object") {
     throw new TypeError("runtime config must be an object");
@@ -99,6 +123,8 @@ export function validateRuntimeConfig(input) {
     throw new Error("local vision baseUrl and model are required");
   }
 
+  validateVisionControls(input.vision);
+
   return {
     bindHost: input.bindHost,
     port: input.port,
@@ -112,6 +138,9 @@ export function validateRuntimeConfig(input) {
     sources: Object.fromEntries(
       principals.map((principal) => [principal, [...input.sources[principal]]]),
     ),
-    vision: { baseUrl: input.vision.baseUrl, model: input.vision.model },
+    vision: {
+      baseUrl: input.vision.baseUrl, model: input.vision.model,
+      ...Object.fromEntries(["num_ctx", "num_predict", "keep_alive"].filter(key => input.vision[key] !== undefined).map(key => [key, input.vision[key]])),
+    },
   };
 }

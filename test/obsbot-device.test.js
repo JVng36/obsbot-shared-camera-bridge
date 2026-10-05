@@ -3,6 +3,25 @@ import test from "node:test";
 
 import { ObsbotDevice } from "../src/obsbot-device.js";
 
+test("interrupt rejects failed or unacknowledged sleep results and closes on shutdown", async () => {
+  for (const result of [{ ok: false }, { ok: true, isError: true }, {}, undefined]) {
+    const direct = new ObsbotDevice({ invoke: async () => result });
+    await assert.rejects(direct.sleep(), /sleep.*failed|sleep.*acknowledge/i);
+    const events = [];
+    const device = new ObsbotDevice({
+      invoke: async () => { throw new Error("old invocation forbidden"); },
+      shutdown: async () => { events.push("old-close"); },
+      restart: async () => ({
+        invoke: async () => result,
+        shutdown: async () => { events.push("new-close"); },
+      }),
+    });
+    await assert.rejects(device.interruptAndSleep(), /sleep.*failed|sleep.*acknowledge/i);
+    await assert.rejects(device.shutdown(), /terminal shutdown failed/i);
+    assert.deepEqual(events, ["old-close", "new-close"]);
+  }
+});
+
 test("device adapter exposes one in-memory snapshot and no recording surface", async () => {
   const calls = [];
   const vendorResult = {

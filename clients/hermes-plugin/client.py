@@ -37,6 +37,7 @@ _ALLOWED_RESPONSE_FIELDS = {
     "/v1/ptz/recenter": {"recentered", "leaseHolder", "leaseExpiresAtMs"},
     "/v1/stop": {
         "active", "expiresAtMs", "reason", "ptzLeaseHolder", "ptzLeaseExpiresAtMs", "parked",
+        "parkingVerification",
         "promptRevision", "promptUpdatedAtMs", "promptUpdatedBy", "promptAction",
         "promptChars", "promptSha256",
     },
@@ -269,6 +270,7 @@ _RESPONSE_VALIDATORS = {
         "ptzLeaseHolder": _is_nullable_agent,
         "ptzLeaseExpiresAtMs": _is_nullable_number,
         "parked": _is_bool,
+        "parkingVerification": lambda value: value == "unverified",
         "promptRevision": _is_nonnegative_int,
         "promptUpdatedAtMs": _is_nonnegative_int,
         "promptUpdatedBy": _is_prompt_actor,

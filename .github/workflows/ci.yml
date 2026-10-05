@@ -71,6 +71,30 @@ jobs:
         run: |
           .\scripts\Install-ObsbotAdapter.ps1 -Destination "$env:RUNNER_TEMP\obsbot-mcp"
 
+  linux-vendor-reconstruction:
+    name: Reconstruct pinned Linux adapter and native fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '24'
+      - name: Install native build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y cmake gcc libjpeg-dev
+      - name: Reconstruct and build without starting the helper
+        run: bash scripts/install-obsbot-adapter.sh --destination "$RUNNER_TEMP/obsbot-mcp"
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --prefix "$RUNNER_TEMP/obsbot-mcp"
+      - name: Run synthetic native fixtures
+        run: sh test/native-snapshot.sh "$RUNNER_TEMP/obsbot-mcp" "$RUNNER_TEMP/native-fixtures"
+      - name: Run native address and undefined-behavior sanitizers
+        env:
+          NATIVE_CFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+          ASAN_OPTIONS: detect_leaks=1
+        run: sh test/native-snapshot.sh "$RUNNER_TEMP/obsbot-mcp" "$RUNNER_TEMP/native-sanitizers"
+
   hermes-plugin-doctor:
     name: Hermes Plugin Doctor
     runs-on: ubuntu-latest
@@ -87,4 +111,5 @@ jobs:
         env:
           SHARED_CAMERA_URL: http://127.0.0.1:8766
           SHARED_CAMERA_AGENT: agent_a
+          SHARED_CAMERA_TOKEN_FILE: /synthetic/not-used-by-registration/token
         run: hermes plugins doctor clients/hermes-plugin --ci

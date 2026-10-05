@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/lxman/obsbot-mcp",
+  "commit": "81200e519da2ef8c1f5d7a11513eee87b4797833",
+  "sourcePath": "src/transport/helper-process.ts",
+  "sha256": "061c905cf21de5be0bf8967c9fcbbc7c425c435a7e8a40ac15de618bc5b5df0e",
+  "license": "MIT",
+  "licenseSha256": "a12ef0acfb71e3b81079baddcbb94004cfb6be4739e6f7c1b0c2e33c5aa07aa1"
+}

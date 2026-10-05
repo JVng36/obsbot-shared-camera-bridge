@@ -5,3 +5,5 @@
 *.jpg binary
 *.jpeg binary
 *.png binary
+# Unified patch context uses a single space for an empty source line.
+*.patch whitespace=-blank-at-eol

@@ -6,7 +6,7 @@
   "type": "module",
   "description": "Privacy-first OBSBOT camera extension for Hermes Agent with explicit finite sessions, local vision, and text-only results",
   "scripts": {
-    "test": "node --test test/auth.test.js test/bridge-look.test.js test/bridge-prompt.test.js test/bridge-ptz.test.js test/bridge-stop.test.js test/config.test.js test/observation-text.test.js test/obsbot-device.test.js test/prompt-store.test.js test/runtime.test.js test/session.test.js && node --test test/http-prompt.test.js test/http-server.test.js test/main.test.js test/ollama-vision.test.js test/windows-scripts.test.js test/vendor-bootstrap.test.js",
+    "test": "node --test test/auth.test.js test/bridge-look.test.js test/bridge-prompt.test.js test/bridge-ptz.test.js test/bridge-stop.test.js test/config.test.js test/observation-text.test.js test/obsbot-device.test.js test/prompt-store.test.js test/runtime.test.js test/session.test.js && node --test test/http-prompt.test.js test/http-server.test.js test/main.test.js test/ollama-vision.test.js test/windows-scripts.test.js test/vendor-bootstrap.test.js && node --test test/linux-launcher.test.js test/linux-entry.test.js test/linux-vision.test.js test/linux-bootstrap.test.js test/linux-helper-lifecycle.test.js && node --test test/fix1-config.test.js test/fix1-vision-offline.test.js test/fix1-vision.test.js test/fix1-launcher.test.js",
     "test:coverage": "node --test --experimental-test-coverage"
   },
   "engines": {

@@ -44,7 +44,7 @@ test("runtime config accepts only loopback or Tailscale bindings", () => {
   assert.deepEqual(config.sources, sources);
   assert.deepEqual(config.principals, ["operator", "agent_a", "agent_b"]);
 
-  for (const bindHost of ["0.0.0.0", "192.168.1.170", "8.8.8.8"]) {
+  for (const bindHost of ["0.0.0.0", "192.168.0.1", "8.8.8.8"]) {
     assert.throws(
       () => validateRuntimeConfig(baseConfig({ bindHost })),
       /loopback or Tailscale/i,
@@ -103,7 +103,7 @@ test("runtime config accepts one principal and eight principals", () => {
   }));
   assert.deepEqual(one.principals, ["operator"]);
 
-  const eightIds = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"];
+  const eightIds = ["alpha", "bravo", "charlie", "delta", "epsilon", "foxtrot", "golf", "hotel"];
   const eightTokens = Object.fromEntries(eightIds.map((id) => [id, uniqueToken(id)]));
   const eightSources = Object.fromEntries(eightIds.map((id, index) => [id, [`100.64.0.${10 + index}`]]));
   const eight = validateRuntimeConfig(baseConfig({
