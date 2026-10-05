@@ -23,7 +23,7 @@ The operator and authorized agents share one bridge-session-scoped VLM system pr
 
 - No service, scheduled task, login item, or automatic restart.
 - The operator starts each session through `Start Shared Camera.cmd` on Windows or the visible-terminal Linux launcher in [docs/LINUX.md](docs/LINUX.md).
-- Duration is explicit and hard-capped at seven days (`10080` minutes); the default remains 30 minutes.
+- Duration is explicit and hard-capped at seven days (`10080` minutes); the default remains 30 minutes. On Linux, omitting `--minutes` prompts for minutes (blank selects 30), with the example `1440 minutes = 24 hours (one full day)`, before separate `START` confirmation.
 - The visible console names the active session and its duration.
 - The Hermes plugin exposes no start or arm tool.
 - Either authorized agent may stop the session immediately. Ctrl+C in the console also stops it.

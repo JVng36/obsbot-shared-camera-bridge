@@ -19,6 +19,7 @@ def launch(args, env, answer=b"START\n", expected_prompt=True):
     os.close(slave)
     output = b""
     answered = False
+    duration_answered = False
     try:
         until = time.monotonic() + 8
         while time.monotonic() < until:
@@ -28,6 +29,9 @@ def launch(args, env, answer=b"START\n", expected_prompt=True):
                 except OSError:
                     break
                 output += chunk
+                if b"Session duration in minutes" in output and not duration_answered:
+                    os.write(master, b"\n")
+                    duration_answered = True
                 if b"Type START" in output and not answered:
                     os.write(master, answer)
                     answered = True

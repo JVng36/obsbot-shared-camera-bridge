@@ -9,17 +9,24 @@ config="$app_root/config/secrets.json"
 vendor_root="$app_root/vendor/obsbot-mcp"
 selected_node=''
 minutes=30
+minutes_explicit=false
 while (( $# )); do
   (( $# >= 2 )) || fail 'Every option requires a value.'
   case "$1" in
     --config) config=$2 ;;
     --vendor-root) vendor_root=$2 ;;
     --node) selected_node=$2 ;;
-    --minutes) minutes=$2 ;;
+    --minutes) minutes=$2; minutes_explicit=true ;;
     *) fail 'Unknown launcher option.' ;;
   esac
   shift 2
 done
+if [[ $minutes_explicit == false ]]; then
+  printf 'Example: 1440 minutes = 24 hours (one full day).\n'
+  printf 'Session duration in minutes (1 through 10080; blank = 30): '
+  IFS= read -r minutes || fail 'Start cancelled.'
+  minutes=${minutes:-30}
+fi
 [[ $minutes =~ ^[0-9]{1,5}$ ]] || fail 'minutes must be an integer from 1 through 10080.'
 minutes=$((10#$minutes))
 (( minutes >= 1 && minutes <= 10080 )) || fail 'minutes must be an integer from 1 through 10080.'

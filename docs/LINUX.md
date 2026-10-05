@@ -86,13 +86,20 @@ In a visible local terminal, from the repository root:
 ./scripts/start-shared-camera.sh \
   --config /absolute/path/to/private/config/secrets.json \
   --vendor-root "$PWD/vendor/obsbot-mcp" \
-  --node /absolute/path/to/node \
-  --minutes 30
+  --node /absolute/path/to/node
 ```
 
-Substitute your own protected paths. Type exactly `START` yourself. Empty input,
-`yes`, EOF, and nonterminal launches refuse activation. There is no auto-confirm
-flag. The default is **30 minutes**, with an unchanged hard maximum of **10080
+Substitute your own protected paths. When `--minutes` is omitted, the launcher
+asks for the session duration in minutes. Enter a decimal integer from **1 through
+10080**, or press Enter for the **30-minute** default. The prompt includes this
+example: **1440 minutes = 24 hours (one full day)**. Invalid duration input or EOF
+cancels before Node or device startup.
+
+After choosing the duration, type exactly `START` yourself at the separate
+confirmation prompt, which displays the chosen duration. Empty input, `yes`, EOF,
+and nonterminal launches refuse activation. To supply the duration directly,
+append `--minutes 1440` (one day); this skips only the duration prompt, **not START
+confirmation**. There is no auto-confirm flag. The hard maximum remains **10080
 minutes (seven days)**. A new session requires another manual confirmation.
 
 Before Node starts, the launcher clears Node preload/module/proxy/diagnostic
@@ -115,7 +122,8 @@ fails or camera state is uncertain, use physical off or disconnect USB/power.
 
 `scripts/shared-camera.desktop.in` is an optional launcher template, not an
 installer or autostart entry. Preserve `Terminal=true` and follow desktop-entry
-escaping rules when substituting paths.
+escaping rules when substituting paths. The template omits `--minutes`, so it
+shows the duration prompt before START confirmation.
 
 ## Native boundary and acceptance
 

@@ -5,10 +5,23 @@ import { fileURLToPath } from 'node:url';
 
 const linuxTest = (name, fn) => test(name, { skip: process.platform !== 'linux' && 'Linux-only behavioral test' }, fn);
 const runner = fileURLToPath(new URL('./linux-launcher-fixture.py', import.meta.url));
+linuxTest('Linux launcher prompts for minutes with a full-day example before START', () => {
+  const result = spawnSync('python3',[runner,'interactive-day'],{encoding:'utf8'});
+  assert.equal(result.status,0,result.stdout+result.stderr);
+});
 linuxTest('Linux launcher requires a terminal before invoking even a fake child', () => {
   const result = spawnSync('python3',[runner,'terminal'],{encoding:'utf8'});
   assert.equal(result.status,0,result.stdout+result.stderr);
 });
+linuxTest('Linux launcher validates interactive bounds, blank default, EOF and exact START', () => {
+  const result = spawnSync('python3',[runner,'interactive-validation'],{encoding:'utf8'});
+  assert.equal(result.status,0,result.stdout+result.stderr);
+});
+linuxTest('Linux launcher explicit minutes bypass duration prompt but still require START', () => {
+  const result = spawnSync('python3',[runner,'explicit-duration'],{encoding:'utf8'});
+  assert.equal(result.status,0,result.stdout+result.stderr);
+});
+
 linuxTest('Linux launcher rejects invalid durations before fake child import in a PTY', () => {
   const result = spawnSync('python3',[runner,'duration'],{encoding:'utf8'});
   assert.equal(result.status,0,result.stdout+result.stderr);
