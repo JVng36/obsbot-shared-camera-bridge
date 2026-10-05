@@ -42,7 +42,7 @@ Do not clone into a web-served directory or a shared synchronization folder. Run
 
 ## 3. Reconstruct the pinned OBSBOT adapter
 
-The adapter is not vendored into this repository. `vendor.lock.json` pins the reviewed upstream commit, and `patches/obsbot-mcp-hardening.patch` pins the dependency-lock and Windows UTF-8 build changes used by this bridge.
+The adapter is not vendored into this repository. `vendor.lock.json` pins the reviewed upstream commit, and `patches/obsbot-mcp-hardening.patch` pins the original dependency-lock and Windows UTF-8 build changes used by this bridge. Both installers additionally apply `patches/obsbot-mcp-dependencies.patch`, which updates only the locked production dependencies fast-uri (3.1.8), hono (4.13.13), and ip-address (10.7.3). The Windows installer does not apply Linux native changes. Production audits remain mandatory; development-only advisories are tracked separately.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Install-ObsbotAdapter.ps1

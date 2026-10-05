@@ -44,8 +44,8 @@ git -C "$destination" apply --check "$patch_path"
 git -C "$destination" apply "$patch_path"
 git -C "$destination" apply --check "$app_root/patches/obsbot-mcp-linux.patch"
 git -C "$destination" apply "$app_root/patches/obsbot-mcp-linux.patch"
-git -C "$destination" apply --check "$app_root/patches/obsbot-mcp-linux-dependencies.patch"
-git -C "$destination" apply "$app_root/patches/obsbot-mcp-linux-dependencies.patch"
+git -C "$destination" apply --check "$app_root/patches/obsbot-mcp-dependencies.patch"
+git -C "$destination" apply "$app_root/patches/obsbot-mcp-dependencies.patch"
 cd -- "$destination"
 npm ci
 npm run build

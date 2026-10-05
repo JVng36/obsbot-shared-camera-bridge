@@ -26,6 +26,10 @@ if ([string]$Lock.commit -notmatch '^[a-f0-9]{40}$') {
 }
 
 $PatchPath = Join-Path $RepoRoot ([string]$Lock.hardening.patch)
+$DependenciesPatchPath = Join-Path $RepoRoot ([string]$Lock.hardening.dependencies_patch)
+if (-not (Test-Path -LiteralPath $DependenciesPatchPath -PathType Leaf)) {
+    throw "Missing portable vendor dependency patch: $DependenciesPatchPath"
+}
 if (-not (Test-Path -LiteralPath $PatchPath -PathType Leaf)) {
     throw "Missing reviewed vendor hardening patch: $PatchPath"
 }
@@ -73,6 +77,8 @@ if ($LASTEXITCODE -ne 0 -or $ActualCommit -ne [string]$Lock.commit) {
 
 Invoke-Checked -FilePath 'git' -Arguments @('-C', $Destination, 'apply', '--check', $PatchPath)
 Invoke-Checked -FilePath 'git' -Arguments @('-C', $Destination, 'apply', $PatchPath)
+Invoke-Checked -FilePath 'git' -Arguments @('-C', $Destination, 'apply', '--check', $DependenciesPatchPath)
+Invoke-Checked -FilePath 'git' -Arguments @('-C', $Destination, 'apply', $DependenciesPatchPath)
 
 Push-Location $Destination
 try {

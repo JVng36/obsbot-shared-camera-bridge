@@ -59,6 +59,7 @@ The prompt may be neutral, playful, subjective, character-specific, or deliberat
 - `Start-SharedCamera.ps1`: visible finite launcher
 - `scripts/Install-ObsbotAdapter.ps1`: pinned adapter reconstruction and verification
 - `patches/obsbot-mcp-hardening.patch`: reviewed dependency-lock and Windows build hardening
+- `patches/obsbot-mcp-dependencies.patch`: portable production dependency updates shared by Windows and Linux
 - `vendor.lock.json`: immutable upstream source and reconstruction metadata
 - `docs/SETUP.md`: clean-machine Windows and Hermes installation guide
 - `docs/LINUX.md`: Linux prerequisites, manual launcher, native reconstruction, and acceptance gates

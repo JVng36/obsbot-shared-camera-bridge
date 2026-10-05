@@ -27,7 +27,8 @@ Deployment hardening:
 - The Windows native helper is compiled from the pinned C++ source on the camera host using Visual Studio. The published prebuilt helper is not used.
 - A local CMake-only hardening patch adds MSVC `/utf-8` so the reviewed UTF-8 source is not interpreted through the host's legacy code page. Runtime source logic is unchanged.
 - Linux helper capture/shutdown repairs are in `patches/obsbot-mcp-linux.patch`;
-  dependency-only updates are in `patches/obsbot-mcp-linux-dependencies.patch`.
+  portable dependency-only updates are in `patches/obsbot-mcp-dependencies.patch`
+  and are applied by both the Windows and Linux installers.
   Apply after the original hardening patch, preserving the pin and MIT license.
   Validate exact-pin reconstruction with upstream tests, compiled synthetic C
   fixtures, and ASAN+UBSAN with leak detection. These offline checks do not

@@ -24,7 +24,7 @@ The script reads `vendor.lock.json`, verifies pinned upstream commit
 
 1. `patches/obsbot-mcp-hardening.patch`
 2. `patches/obsbot-mcp-linux.patch`
-3. `patches/obsbot-mcp-linux-dependencies.patch`
+3. `patches/obsbot-mcp-dependencies.patch` (shared with Windows)
 
 It runs `npm ci`, the upstream build and tests, and the Linux CMake build. It
 copies the source-built helper into the vendor platform directory and prints its
