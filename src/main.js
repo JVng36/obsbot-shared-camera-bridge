@@ -83,9 +83,19 @@ export function initializeBridge(
   return { bridge, session, promptStore };
 }
 
-export async function run(argv = process.argv.slice(2)) {
+export async function finishStoppedRuntime({ bridge, runtime }) {
+  try {
+    // Join the existing quiesce before terminal device shutdown can cancel
+    // its replacement backend. The session has already been invalidated.
+    await bridge.terminate("operator");
+  } finally {
+    await runtime.shutdown("operator", { bridgeAlreadyQuiesced: true });
+  }
+}
+
+export async function run(argv = process.argv.slice(2), { rawConfig: providedConfig } = {}) {
   const args = parseArgs(argv);
-  const rawConfig = JSON.parse(await readFile(resolve(args.configPath), "utf8"));
+  const rawConfig = providedConfig ?? JSON.parse(await readFile(resolve(args.configPath), "utf8"));
   const config = validateRuntimeConfig({
     ...rawConfig,
     minutes: args.minutes ?? rawConfig.minutes,
@@ -109,8 +119,7 @@ export async function run(argv = process.argv.slice(2)) {
     auth,
     logger: contentFreeLog,
     onStopped: () => {
-      return runtime
-        .shutdown("operator", { bridgeAlreadyQuiesced: true })
+      return finishStoppedRuntime({ bridge, runtime })
         .catch(reportShutdownFailure);
     },
   });

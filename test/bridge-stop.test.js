@@ -231,6 +231,51 @@ test("parking failures return a terminal parked-false result", async () => {
   assert.deepEqual(events, ["interrupt-failed", "shutdown-failed"]);
 });
 
+test("Stop aborts vision immediately even when sleep later fails", async () => {
+  let resolveVision;
+  let signal;
+  let visionReady;
+  const ready = new Promise((resolve) => { visionReady = resolve; });
+  let rejectSleep;
+  const sleepGate = new Promise((_, reject) => { rejectSleep = reject; });
+  const frame = { base64: "synthetic", mime: "image/jpeg", width: 640, height: 360 };
+  let shutdowns = 0;
+  const bridge = new SharedCameraBridge({
+    session: makeSession(),
+    device: {
+      async snapshot() { return frame; },
+      async interruptAndSleep() { return sleepGate; },
+      async shutdown() { shutdowns += 1; },
+    },
+    vision: { async describe(args) {
+      signal = args.signal;
+      visionReady();
+      return new Promise((resolve) => { resolveVision = resolve; });
+    } },
+  });
+  const look = bridge.look("agent_b");
+  await ready;
+  const stop = bridge.stop("agent_a");
+  assert.equal(signal.aborted, true);
+  assert.equal(bridge.status().active, false);
+  resolveVision("late synthetic result");
+  await assert.rejects(look, /discarded.*session stopped/i);
+  assert.equal(frame.base64, "");
+  rejectSleep(new Error("synthetic sleep failed"));
+  const result = await stop;
+  assert.equal(result.parked, false);
+  assert.equal(result.parkingVerification, "unverified");
+  assert.equal(shutdowns, 1);
+});
+
+test("Stop never accepts a truthy non-boolean parking result", async () => {
+  const bridge = new SharedCameraBridge({
+    session: makeSession(), device: { async interruptAndSleep() { return { ok: false }; } },
+    vision: {},
+  });
+  assert.equal((await bridge.stop("agent_a")).parked, false);
+});
+
 test("bridge stop prevents stale device wake from capturing on replacement backend", async () => {
   const events = [];
   let releaseOldWake;

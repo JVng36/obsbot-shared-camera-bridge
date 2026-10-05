@@ -37,6 +37,26 @@ class FakeResponse:
 
 
 class CameraClientTests(unittest.TestCase):
+    def test_stop_parking_marker_never_claims_physical_verification(self):
+        payload = {
+            "active": False, "reason": "stopped", "parked": True,
+            "parkingVerification": "unverified", "promptRevision": 0,
+            "promptUpdatedAtMs": 1000, "promptUpdatedBy": "system",
+            "promptAction": "initial", "promptChars": 700,
+            "promptSha256": "a" * 64,
+        }
+        with TemporaryDirectory() as temp_dir:
+            token_file = Path(temp_dir) / "token"
+            token_file.write_text("x" * 43, encoding="utf-8")
+            client = CameraClient(
+                base_url="http://127.0.0.1:8766", token_file=token_file,
+                open_impl=lambda _request, timeout: FakeResponse(payload),
+            )
+            self.assertEqual(client.post("/v1/stop", {})["parkingVerification"], "unverified")
+            payload["parkingVerification"] = "verified"
+            with self.assertRaisesRegex(RuntimeError, "invalid response field types"):
+                client.post("/v1/stop", {})
+
     def test_default_opener_disables_environment_proxies(self):
         with patch.dict(
             os.environ,
@@ -99,7 +119,7 @@ class CameraClientTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             token_file = Path(temp_dir) / "token"
             token_file.write_text("x" * 43, encoding="utf-8")
-            for url in ["https://camera.example.com", "http://192.168.1.170:8766", "http://0.0.0.0:8766"]:
+            for url in ["https://camera.example.com", "http://192.168.0.1:8766", "http://0.0.0.0:8766"]:
                 with self.subTest(url=url):
                     with self.assertRaisesRegex(ValueError, "loopback or Tailscale"):
                         CameraClient(base_url=url, token_file=token_file)

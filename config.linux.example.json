@@ -1,0 +1,29 @@
+{
+  "bindHost": "100.64.0.10",
+  "port": 8766,
+  "minutes": 30,
+  "operatorPrincipal": "operator",
+  "tokens": {
+    "operator": "GENERATE_A_UNIQUE_OPERATOR_BASE64URL_TOKEN_OF_AT_LEAST_43_CHARACTERS",
+    "agent_a": "GENERATE_A_UNIQUE_AGENT_A_BASE64URL_TOKEN_OF_AT_LEAST_43_CHARACTERS",
+    "agent_b": "GENERATE_A_UNIQUE_AGENT_B_BASE64URL_TOKEN_OF_AT_LEAST_43_CHARACTERS"
+  },
+  "sources": {
+    "operator": [
+      "100.64.0.10"
+    ],
+    "agent_a": [
+      "100.64.0.11"
+    ],
+    "agent_b": [
+      "100.64.0.12"
+    ]
+  },
+  "vision": {
+    "baseUrl": "http://127.0.0.1:11434",
+    "model": "qwen3.5:9b",
+    "num_ctx": 4096,
+    "num_predict": 300,
+    "keep_alive": 0
+  }
+}

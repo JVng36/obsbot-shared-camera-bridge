@@ -7,6 +7,7 @@
   "license_copy": "docs/licenses/obsbot-mcp-MIT.txt",
   "hardening": {
     "patch": "patches/obsbot-mcp-hardening.patch",
+    "dependencies_patch": "patches/obsbot-mcp-dependencies.patch",
     "production_audit": "0 vulnerabilities",
     "upstream_tests_after_build": "586/586 passed",
     "native_build": "Build from pinned source with MSVC /utf-8; do not use the upstream prebuilt executable"

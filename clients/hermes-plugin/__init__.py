@@ -3,23 +3,36 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 from typing import Any
 
 from .client import CameraClient
 
 
 def _get_client() -> CameraClient:
-    base_url = (os.getenv("SHARED_CAMERA_URL") or "").strip()
+    # Resolve at dispatch time so routed profiles use their current context.
+    try:
+        from agent.secret_scope import get_secret
+        if not callable(get_secret):
+            raise TypeError
+    except Exception:
+        raise ValueError(
+            "Camera profile configuration requires agent.secret_scope.get_secret"
+        ) from None
+
+    try:
+        base_url = (get_secret("SHARED_CAMERA_URL", default=None) or "").strip()
+        expected_agent = get_secret("SHARED_CAMERA_AGENT", default=None) or ""
+        token_path = get_secret("SHARED_CAMERA_TOKEN_FILE", default=None)
+    except Exception:
+        # Scoped errors can contain secrets. Never expose them or try getenv.
+        raise ValueError("Camera profile configuration lookup failed") from None
+
     if not base_url:
         raise ValueError("SHARED_CAMERA_URL is required")
-    expected_agent = os.getenv("SHARED_CAMERA_AGENT") or ""
     if not expected_agent:
         raise ValueError("SHARED_CAMERA_AGENT is required")
-    token_path = os.getenv("SHARED_CAMERA_TOKEN_FILE")
     if not token_path:
-        token_path = str(Path.home() / ".config" / "shared-camera" / "token")
+        raise ValueError("SHARED_CAMERA_TOKEN_FILE is required")
     return CameraClient(
         base_url=base_url,
         token_file=token_path,

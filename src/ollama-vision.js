@@ -1,10 +1,63 @@
+import { request, Agent } from "node:http";
+import { validateVisionControls } from "./config.js";
 import { DEFAULT_VLM_SYSTEM_PROMPT } from "./prompt-store.js";
 
 const MAX_VISION_RESPONSE_BYTES = 16_384;
 
+// Explicit numeric loopback and a dedicated Agent bypass ambient proxy/dispatcher
+// and http.globalAgent state. Each request owns and releases its sockets.
+function nativeLoopbackFetch(url, { body, signal }) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const parsed = new URL(url);
+    const hostname = parsed.hostname === "[::1]" ? "::1" : "127.0.0.1";
+    const agent = new Agent({ keepAlive: false, proxyEnv: {} });
+    let response;
+    const cleanup = () => { signal.removeEventListener("abort", abort); agent.destroy(); };
+    const abort = () => {
+      response?.destroy(signal.reason);
+      req.destroy(signal.reason);
+    };
+    const req = request({
+      protocol: "http:", hostname, port: parsed.port || 80,
+      path: "/api/chat", method: "POST", agent,
+      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+    }, res => {
+      response = res;
+      if (res.statusCode >= 300 && res.statusCode < 400) {
+        res.resume(); req.destroy(); cleanup();
+        reject(new Error("local vision refused redirect")); return;
+      }
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume(); req.destroy(); cleanup();
+        reject(new Error(`local vision request failed with HTTP ${res.statusCode}`)); return;
+      }
+      // Preserve the explicit fake-fetch response interface without using fetch.
+      const iterator = res[Symbol.asyncIterator]();
+      resolve({
+        ok: true, status: res.statusCode,
+        headers: { get: name => res.headers[name.toLowerCase()] ?? null },
+        body: {
+          cancel: async () => { res.destroy(); cleanup(); },
+          getReader: () => ({
+            read: () => iterator.next(),
+            cancel: async () => { res.destroy(); cleanup(); },
+            releaseLock: cleanup,
+          }),
+        },
+      });
+    });
+    req.on("error", error => { cleanup(); reject(error); });
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    else req.end(body);
+  });
+}
+
 async function readBoundedJson(response) {
   const contentType = response.headers?.get?.("content-type") ?? "";
   if (!/^application\/json(?:\s*;|$)/i.test(contentType)) {
+    await response.body?.cancel?.();
     throw new Error("local vision returned an invalid content type");
   }
   const declaredLength = Number(response.headers?.get?.("content-length"));
@@ -63,17 +116,26 @@ export class OllamaVision {
   #fetch;
   #model;
   #timeoutMs;
+  #options;
+  #keepAlive;
 
   constructor({
     baseUrl = "http://127.0.0.1:11434",
     model = "qwen3.8:27b",
-    fetchImpl = globalThis.fetch,
+    // Explicit dependency injection is a test seam, never a config/environment option.
+    fetchImpl = nativeLoopbackFetch,
     timeoutMs = 60_000,
+    num_ctx,
+    num_predict = 300,
+    keep_alive = "2m",
   } = {}) {
+    validateVisionControls({baseUrl, model, num_ctx, num_predict, keep_alive});
     this.#baseUrl = assertLoopback(baseUrl);
     this.#model = model;
     this.#fetch = fetchImpl;
     this.#timeoutMs = timeoutMs;
+    this.#options = { temperature: 0.2, num_predict, ...(num_ctx === undefined ? {} : { num_ctx }) };
+    this.#keepAlive = keep_alive;
   }
 
   async describe({
@@ -108,11 +170,8 @@ export class OllamaVision {
         model: this.#model,
         stream: false,
         think: false,
-        keep_alive: "2m",
-        options: {
-          temperature: 0.2,
-          num_predict: 300,
-        },
+        keep_alive: this.#keepAlive,
+        options: this.#options,
         messages: [
           {
             role: "system",
@@ -132,6 +191,9 @@ export class OllamaVision {
       throw new Error(`local vision request failed with HTTP ${response.status}`);
     }
     const payload = await readBoundedJson(response);
+    if (payload?.done === false || payload?.done_reason === "length") {
+      throw new Error("local vision returned a truncated response");
+    }
     const content = payload?.message?.content;
     if (typeof content !== "string" || content.trim() === "") {
       throw new Error("local vision returned an empty response");

@@ -178,7 +178,7 @@ export class SharedCameraBridge {
     let parked = false;
     if (typeof this.#device.interruptAndSleep === "function") {
       try {
-        parked = await this.#device.interruptAndSleep();
+        parked = (await this.#device.interruptAndSleep()) === true;
       } catch {
         if (typeof this.#device.shutdown === "function") {
           try {
@@ -193,7 +193,8 @@ export class SharedCameraBridge {
       await this.#withCamera(() => this.#device.sleep());
       parked = true;
     }
-    return { ...this.status(), parked };
+    // Legacy `parked` reports sleep completion, never physical telemetry.
+    return { ...this.status(), parked, parkingVerification: "unverified" };
   }
 
   #claimPtz(agent) {

@@ -123,7 +123,7 @@ export class ObsbotDevice {
       this.#scrubResult(result);
       throw error;
     }
-    if (result?.ok === false) {
+    if (result?.ok === false || result?.isError === true) {
       this.#scrubResult(result);
       throw new Error(`${tool} failed`);
     }
@@ -193,7 +193,10 @@ export class ObsbotDevice {
   }
 
   async sleep() {
-    await this.#call("obsbot_sleep");
+    const result = await this.#call("obsbot_sleep");
+    if (result?.ok !== true) {
+      throw new Error("obsbot_sleep did not acknowledge success");
+    }
   }
 
   interruptAndSleep() {
@@ -220,7 +223,11 @@ export class ObsbotDevice {
       throw terminalDeviceError();
     }
     this.#backend = replacement;
-    await this.#callOn(replacement, "obsbot_sleep");
+    const result = await this.#callOn(replacement, "obsbot_sleep");
+    if (result?.ok !== true) {
+      throw new Error("obsbot_sleep did not acknowledge success");
+    }
+    // This acknowledges command delivery only; no physical pose is read.
     return true;
   }
 

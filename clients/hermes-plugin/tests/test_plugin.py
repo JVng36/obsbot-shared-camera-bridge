@@ -1,4 +1,8 @@
 import importlib.util
+from contextlib import contextmanager
+from contextvars import ContextVar
+import os
+from types import ModuleType
 import json
 from pathlib import Path
 import sys
@@ -21,6 +25,18 @@ def load_plugin():
     return module
 
 
+@contextmanager
+def scoped_api(values=None):
+    current = ContextVar("synthetic_camera_scope", default=values or {})
+    agent = ModuleType("agent")
+    agent.__path__ = []
+    scope = ModuleType("agent.secret_scope")
+    scope.get_secret = lambda name, default=None: current.get().get(name, default)
+    agent.secret_scope = scope
+    with patch.dict(sys.modules, {"agent": agent, "agent.secret_scope": scope}):
+        yield current, scope
+
+
 class FakeContext:
     def __init__(self):
         self.tools = {}
@@ -35,7 +51,9 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertIn("requires_env:", manifest)
         self.assertIn("SHARED_CAMERA_URL", manifest)
         self.assertIn("SHARED_CAMERA_AGENT", manifest)
-        self.assertIn("optional_env:", manifest)
+        required = manifest.split("requires_env:\n", 1)[1].split("provides_tools:", 1)[0]
+        self.assertIn("SHARED_CAMERA_TOKEN_FILE", required)
+        self.assertNotIn("optional_env:", required)
         self.assertIn("SHARED_CAMERA_TOKEN_FILE", manifest)
 
     def test_plugin_registers_only_bounded_camera_tools(self):
@@ -72,58 +90,133 @@ class PluginRegistrationTests(unittest.TestCase):
         joined = " ".join(tool["description"] for tool in context.tools.values())
         self.assertRegex(joined.lower(), r"operator")
 
-    def test_plugin_requires_explicit_url_and_agent_and_keeps_token_file_fallback(self):
+    def test_plugin_requires_explicit_url_agent_and_token_file(self):
         plugin = load_plugin()
-        with patch.dict("os.environ", {}, clear=True):
+        with scoped_api({}):
             with self.assertRaisesRegex(ValueError, "SHARED_CAMERA_URL"):
                 plugin._get_client()
-        with patch.dict(
-            "os.environ",
+        with scoped_api(
             {"SHARED_CAMERA_URL": "http://100.64.0.10:8766"},
-            clear=True,
         ):
             with self.assertRaisesRegex(ValueError, "SHARED_CAMERA_AGENT"):
                 plugin._get_client()
-        with patch.dict(
-            "os.environ",
+        with scoped_api(
             {
                 "SHARED_CAMERA_URL": "http://100.64.0.10:8766",
                 "SHARED_CAMERA_AGENT": "desk-cam_01",
                 "SHARED_CAMERA_TOKEN_FILE": "/tmp/agent-camera-token",
             },
-            clear=True,
         ):
             client = plugin._get_client()
         self.assertEqual(client._expected_agent, "desk-cam_01")
         self.assertEqual(client._base_url, "http://100.64.0.10:8766")
         self.assertEqual(client._token_file, Path("/tmp/agent-camera-token"))
 
-        with patch.object(plugin.Path, "home", return_value=Path("/synthetic-home")):
-            with patch.dict(
-                "os.environ",
-                {
-                    "SHARED_CAMERA_URL": "http://127.0.0.1:8766",
-                    "SHARED_CAMERA_AGENT": "ops",
-                },
-                clear=True,
-            ):
-                client = plugin._get_client()
-        self.assertEqual(client._expected_agent, "ops")
-        self.assertEqual(
-            client._token_file,
-            Path("/synthetic-home") / ".config" / "shared-camera" / "token",
-        )
+        with scoped_api({
+            "SHARED_CAMERA_URL": "http://127.0.0.1:8766",
+            "SHARED_CAMERA_AGENT": "ops",
+        }):
+            with self.assertRaisesRegex(ValueError, "SHARED_CAMERA_TOKEN_FILE"):
+                plugin._get_client()
+
+    def test_scoped_misses_ignore_populated_process_environment(self):
+        plugin = load_plugin()
+        values = {
+            "SHARED_CAMERA_URL": "http://127.0.0.1:8766",
+            "SHARED_CAMERA_AGENT": "agent_a",
+            "SHARED_CAMERA_TOKEN_FILE": "/synthetic/a/token",
+        }
+        for missing in values:
+            with self.subTest(missing=missing):
+                with patch.dict(os.environ, values), scoped_api({
+                    key: value for key, value in values.items() if key != missing
+                }), patch.object(plugin, "CameraClient") as client, patch.object(
+                    os, "getenv", side_effect=AssertionError("process environment read")
+                ):
+                    result = json.loads(plugin.handle_status({}))
+                    self.assertFalse(result["success"])
+                    self.assertIn(missing, result["error"])
+                    client.assert_not_called()
+
+    def test_scoped_lookup_exceptions_are_safe_and_never_use_environment(self):
+        plugin = load_plugin()
+
+        class UnscopedSecretError(RuntimeError):
+            pass
+
+        for exception in (UnscopedSecretError, RuntimeError):
+            for handler in (plugin.handle_status, plugin.handle_look, plugin.handle_prompt_get):
+                with self.subTest(exception=exception, handler=handler.__name__):
+                    with scoped_api() as (_current, scope), patch.object(
+                        plugin, "CameraClient"
+                    ) as client, patch.object(os, "getenv", side_effect=AssertionError("getenv")):
+                        scope.get_secret = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                            exception("SYNTHETIC_SECRET_MUST_NOT_ESCAPE")
+                        )
+                        result = json.loads(handler({}))
+                        self.assertEqual(result, {
+                            "success": False,
+                            "error": "Camera profile configuration lookup failed",
+                        })
+                        client.assert_not_called()
+
+    def test_missing_scoped_api_fails_closed_with_safe_diagnostic(self):
+        plugin = load_plugin()
+        for missing in ("module", "function", "callable"):
+            with self.subTest(missing=missing), scoped_api() as (_current, scope):
+                if missing == "module":
+                    modules = {"agent.secret_scope": None}
+                else:
+                    modules = {}
+                    if missing == "function":
+                        del scope.get_secret
+                    else:
+                        scope.get_secret = None
+                with patch.dict(sys.modules, modules), patch.object(plugin, "CameraClient") as client, patch.object(
+                    os, "getenv", side_effect=AssertionError("getenv")
+                ):
+                    result = json.loads(plugin.handle_status({}))
+                    self.assertEqual(result, {
+                        "success": False,
+                        "error": "Camera profile configuration requires agent.secret_scope.get_secret",
+                    })
+                    client.assert_not_called()
+
+    def test_dispatch_resolves_current_scope_each_time(self):
+        plugin = load_plugin()
+        context = FakeContext()
+        plugin.register(context)
+        seen = []
+
+        class FakeClient:
+            def __init__(self, **kwargs):
+                seen.append(kwargs)
+
+            def get(self, path):
+                return {"path": path}
+
+        with scoped_api() as (current, _scope):
+            with patch.object(plugin, "CameraClient", FakeClient):
+                for label in ("a", "b", "a"):
+                    current.set({
+                        "SHARED_CAMERA_URL": f"http://127.0.0.{1 if label == 'a' else 2}:8766",
+                        "SHARED_CAMERA_AGENT": f"agent_{label}",
+                        "SHARED_CAMERA_TOKEN_FILE": f"/synthetic/{label}/token",
+                    })
+                    result = json.loads(context.tools["shared_camera_status"]["handler"]({}))
+                    self.assertTrue(result["success"])
+        self.assertEqual([item["expected_agent"] for item in seen], ["agent_a", "agent_b", "agent_a"])
+        self.assertEqual([item["token_file"] for item in seen], ["/synthetic/a/token", "/synthetic/b/token", "/synthetic/a/token"])
+        self.assertEqual([item["base_url"] for item in seen], ["http://127.0.0.1:8766", "http://127.0.0.2:8766", "http://127.0.0.1:8766"])
 
     def test_plugin_rejects_normalized_or_mistyped_agent_identity(self):
         plugin = load_plugin()
-        with patch.dict(
-            "os.environ",
+        with scoped_api(
             {
                 "SHARED_CAMERA_URL": "http://127.0.0.1:8766",
                 "SHARED_CAMERA_AGENT": "Agent_A",
                 "SHARED_CAMERA_TOKEN_FILE": "/tmp/invalid-agent-token",
             },
-            clear=True,
         ):
             with self.assertRaisesRegex(ValueError, "principal ID"):
                 plugin._get_client()

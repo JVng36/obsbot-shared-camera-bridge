@@ -1,0 +1,948 @@
+--- a/src/transport/helper-process.ts
++++ b/src/transport/helper-process.ts
+@@ -77,6 +77,7 @@
+   private queue: Array<{ resolve: (r: RpcResponse) => void; reject: (e: Error) => void }> = [];
+   /** Set once the child is gone; every later request fails with this. */
+   private dead?: Error;
++  private closing?: Promise<void>;
+   /** Set once an op reports the DEVICE gone, even though the process lives on. */
+   private lostDevice = false;
+   /** Listeners for unsolicited camera arrival/removal pushed by the helper. */
+@@ -396,6 +397,30 @@
+   }
+ 
+   async close(): Promise<void> {
++    if (process.platform === "linux") {
++      if (this.closing) return this.closing;
++      this.failAll(new Error("helper process closed"));
++      this.rl?.close();
++      const proc = this.proc;
++      if (!proc || !proc.pid || proc.exitCode !== null || proc.signalCode !== null) return;
++      this.closing = new Promise<void>((resolve, reject) => {
++        const cleanup = () => {
++          clearTimeout(killTimer);
++          clearTimeout(failureTimer);
++          proc.removeListener("exit", exited);
++        };
++        const exited = () => { cleanup(); resolve(); };
++        proc.once("exit", exited);
++        const killTimer = setTimeout(() => { proc.kill("SIGKILL"); }, 500);
++        const failureTimer = setTimeout(() => {
++          cleanup();
++          reject(new Error("Linux helper did not exit after bounded shutdown"));
++        }, 1500);
++        proc.stdin.end();
++        proc.kill("SIGTERM");
++      });
++      return this.closing;
++    }
+     // Mark dead BEFORE tearing down, so anything still queued fails with an
+     // intentional-shutdown reason rather than racing the 'exit' handler.
+     this.failAll(new Error("helper process closed"));
+--- a/native/linux/helper.c
++++ b/native/linux/helper.c
+@@ -31,6 +31,9 @@
+ #include <linux/videodev2.h>
+ #include <linux/uvcvideo.h>
+ #include <jpeglib.h>
++#include <setjmp.h>
++#include <poll.h>
++#include <ctype.h>
+ 
+ // ---- UVC request codes (from linux/usb/video.h) ----
+ #ifndef UVC_SET_CUR
+@@ -183,9 +186,10 @@
+                           char *out, size_t out_max)
+ {
+     size_t n = 0;
++    if (len > 6000000 || out_max == 0 || ((len + 2) / 3) * 4 >= out_max) return -1;
+     for (size_t i = 0; i < len; i += 3) {
+         uint32_t v;
+-        if (n + 4 > out_max) break;
++
+         v = (uint32_t)data[i] << 16;
+         if (i + 1 < len) v |= (uint32_t)data[i + 1] << 8;
+         if (i + 2 < len) v |= data[i + 2];
+@@ -865,231 +869,194 @@
+ 
+ // ---- snapshot via V4L2 mmap + libjpeg ----
+ 
+-static void do_snapshot(const char *path_arg, long max_dim,
+-                         long quality, long settle_ms)
+-{
+-    const char *path;
+-    int fd;
+-    struct v4l2_format fmt;
+-    struct v4l2_requestbuffers req;
+-    struct v4l2_buffer dq;
+-    enum v4l2_buf_type type;
+-    unsigned int nbufs, src_w, src_h, out_w, out_h;
+-    int is_mjpeg;
+-    char b64_buf[1572864]; /* 1.5 MB — safety buffer for ~768KB MJPEG frames */
+-
+-    (void)settle_ms; /* V4L2 pulls one frame directly -- no settle needed */
+-
+-    path = (path_arg && *path_arg) ? path_arg : g_open_path;
+-    if (!path || !*path) { error_response("snapshot: no device open and no path given"); return; }
+-
+-    fd = open(path, O_RDWR);
++/* MJPEG only: no YUYV conversion or resize fallback. TERM retains its default
++ * disposition, so owned-child shutdown interrupts poll, settle and capture;
++ * the kernel releases fd/mappings on termination. Normal paths verify cleanup.
++ */
++#define SNAPSHOT_MAX_BYTES 6000000U
++
++/* Snapshot requests are flat JSON objects. Validate numeric JSON tokens without
++ * strtol coercion, including duplicate fields and quoted numbers. */
++static int snapshot_options(const char *j, long *dim, long *quality, long *settle)
++{
++    unsigned seen = 0;
++    *dim = 1280; *quality = 85; *settle = 600;
++    while (isspace((unsigned char)*j)) j++;
++    if (*j++ != '{') return -1;
++    for (;;) {
++        char key[64]; size_t n = 0;
++        while (isspace((unsigned char)*j)) j++;
++        if (*j != '"') return -1;
++        j++;
++        while (*j && *j != '"') {
++            if (*j == '\\' || (unsigned char)*j < 32 || n >= sizeof(key)-1) return -1;
++            key[n++] = *j++;
++        }
++        key[n] = 0;
++        if (*j++ != '"') return -1;
++        while (isspace((unsigned char)*j)) j++;
++        if (*j++ != ':') return -1;
++        while (isspace((unsigned char)*j)) j++;
++        unsigned bit = !strcmp(key,"maxDim") ? 1 : !strcmp(key,"quality") ? 2 : !strcmp(key,"settleMs") ? 4 : 0;
++        if (bit) {
++            unsigned value = 0;
++            if (seen & bit || !isdigit((unsigned char)*j)) return -1;
++            seen |= bit;
++            if (*j == '0' && isdigit((unsigned char)j[1])) return -1;
++            do {
++                value = value * 10 + (unsigned)(*j++ - '0');
++                if (value > 5000) return -1;
++            } while (isdigit((unsigned char)*j));
++            if (bit == 1) { if (value < 1 || value > 1280) return -1; *dim = value; }
++            if (bit == 2) { if (value < 1 || value > 100) return -1; *quality = value; }
++            if (bit == 4) *settle = value;
++        } else {
++            /* Only op/path strings are supported in this flat request. */
++            if (strcmp(key,"op") && strcmp(key,"path")) return -1;
++            if (*j++ != '"') return -1;
++            while (*j && *j != '"') {
++                if ((unsigned char)*j < 32) return -1;
++                if (*j == '\\') {
++                    j++;
++                    if (!*j || !strchr("\"\\/bfnrt", *j)) return -1;
++                }
++                j++;
++            }
++            if (*j++ != '"') return -1;
++        }
++        while (isspace((unsigned char)*j)) j++;
++        if (*j == '}') { j++; break; }
++        if (*j++ != ',') return -1;
++    }
++    while (isspace((unsigned char)*j)) j++;
++    return *j ? -1 : 0;
++}
++
++struct snapshot_jpeg {
++    struct jpeg_decompress_struct c;
++    struct jpeg_error_mgr err;
++    jmp_buf jump;
++};
++static void snapshot_jpeg_error(j_common_ptr c)
++{
++    struct snapshot_jpeg *ctx = (struct snapshot_jpeg *)c;
++    longjmp(ctx->jump, 1);
++}
++static void snapshot_jpeg_message(j_common_ptr c, int level)
++{
++    if (level < 0) snapshot_jpeg_error(c); /* warnings include premature EOF */
++}
++static int validate_jpeg(const unsigned char *data, size_t len, unsigned w, unsigned h)
++{
++    if (len < 4 || len > SNAPSHOT_MAX_BYTES || data[0]!=0xff || data[1]!=0xd8 ||
++        data[len-2]!=0xff || data[len-1]!=0xd9) return -1;
++    struct snapshot_jpeg *ctx = calloc(1, sizeof(*ctx));
++    if (!ctx) return -1;
++    ctx->c.err = jpeg_std_error(&ctx->err);
++    ctx->err.error_exit = snapshot_jpeg_error;
++    ctx->err.emit_message = snapshot_jpeg_message;
++    if (setjmp(ctx->jump)) { jpeg_destroy_decompress(&ctx->c); free(ctx); return -1; }
++    jpeg_create_decompress(&ctx->c);
++    ctx->c.mem->max_memory_to_use = 16 * 1024 * 1024;
++    jpeg_mem_src(&ctx->c, data, len);
++    if (jpeg_read_header(&ctx->c, TRUE) != JPEG_HEADER_OK ||
++        ctx->c.image_width != w || ctx->c.image_height != h ||
++        ctx->c.progressive_mode || jpeg_has_multiple_scans(&ctx->c) ||
++        ctx->c.num_components != 3) {
++        jpeg_destroy_decompress(&ctx->c); free(ctx); return -1;
++    }
++    ctx->c.out_color_space = JCS_RGB;
++    jpeg_start_decompress(&ctx->c);
++    JSAMPARRAY row = (*ctx->c.mem->alloc_sarray)((j_common_ptr)&ctx->c,
++                          JPOOL_IMAGE, w * 3, 1);
++    while (ctx->c.output_scanline < ctx->c.output_height)
++        if (jpeg_read_scanlines(&ctx->c, row, 1) != 1) snapshot_jpeg_error((j_common_ptr)&ctx->c);
++    if (!jpeg_finish_decompress(&ctx->c)) snapshot_jpeg_error((j_common_ptr)&ctx->c);
++    if (ctx->c.src->bytes_in_buffer != 0) snapshot_jpeg_error((j_common_ptr)&ctx->c);
++    jpeg_destroy_decompress(&ctx->c); free(ctx); return 0;
++}
++
++static void do_snapshot(const char *path_arg, long max_dim, long quality, long settle_ms)
++{
++    if (max_dim < 1 || max_dim > 1280 || quality < 1 || quality > 100 || settle_ms < 0 || settle_ms > 5000) {
++        error_response("snapshot: invalid numeric options"); return;
++    }
++    const char *path = path_arg && *path_arg ? path_arg : g_open_path;
++    if (!*path) { error_response("snapshot: missing path"); return; }
++    /* No stream or device is held during settling. Default TERM interrupts it. */
++    struct timespec delay = {settle_ms / 1000, (settle_ms % 1000) * 1000000};
++    if (nanosleep(&delay, NULL) < 0) { error_response("snapshot: settle interrupted"); return; }
++    int fd = open(path, O_RDWR | O_NONBLOCK);
+     if (fd < 0) { error_response("snapshot: cannot open device"); return; }
+-
+-    /* Negotiate format: try MJPEG first */
+-    memset(&fmt, 0, sizeof(fmt));
+-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+-    fmt.fmt.pix.width = 1920;
+-    fmt.fmt.pix.height = 1080;
+-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+-    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+-
+-    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+-        fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+-        if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+-            close(fd);
+-            error_response("snapshot: cannot set video format");
+-            return;
+-        }
+-    }
+-
+-    src_w = fmt.fmt.pix.width;
+-    src_h = fmt.fmt.pix.height;
+-    is_mjpeg = (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_MJPEG);
+-
+-    /* Request buffers */
+-    memset(&req, 0, sizeof(req));
+-    req.count = 4;
+-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+-    req.memory = V4L2_MEMORY_MMAP;
+-
+-    if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
+-        close(fd);
+-        error_response("snapshot: cannot request buffers");
+-        return;
+-    }
+-
+-    nbufs = req.count;
+-    if (nbufs > 4) nbufs = 4;
+-
+-    /* Query and mmap buffers */
+-    {
+-        struct v4l2_buffer_info {
+-            void   *start;
+-            size_t  length;
+-        } bufs[4];
+-        unsigned int i;
+-        int ok = 1;
+-
+-        for (i = 0; i < nbufs && ok; i++) {
+-            struct v4l2_buffer buf;
+-            memset(&buf, 0, sizeof(buf));
+-            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+-            buf.memory = V4L2_MEMORY_MMAP;
+-            buf.index = i;
+-
+-            if (ioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
+-                ok = 0;
+-                break;
+-            }
+-            bufs[i].length = buf.length;
+-            bufs[i].start = mmap(NULL, buf.length,
+-                                  PROT_READ | PROT_WRITE, MAP_SHARED,
+-                                  fd, buf.m.offset);
+-            if (bufs[i].start == MAP_FAILED) {
+-                ok = 0;
+-                break;
+-            }
+-        }
+-
+-        if (!ok) {
+-            for (unsigned int j = 0; j < i; j++)
+-                munmap(bufs[j].start, bufs[j].length);
+-            req.count = 0;
+-            ioctl(fd, VIDIOC_REQBUFS, &req);
+-            close(fd);
+-            error_response("snapshot: buffer setup failed");
+-            return;
+-        }
+-
+-        /* Queue all buffers */
+-        for (i = 0; i < nbufs; i++) {
+-            struct v4l2_buffer buf;
+-            memset(&buf, 0, sizeof(buf));
+-            buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+-            buf.memory = V4L2_MEMORY_MMAP;
+-            buf.index = i;
+-            if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+-                ok = 0;
+-                break;
+-            }
+-        }
+-
+-        if (!ok) {
+-            for (unsigned int j = 0; j < nbufs; j++)
+-                munmap(bufs[j].start, bufs[j].length);
+-            req.count = 0;
+-            ioctl(fd, VIDIOC_REQBUFS, &req);
+-            close(fd);
+-            error_response("snapshot: queue failed");
+-            return;
+-        }
+-
+-        /* Start streaming */
+-        type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+-        if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) {
+-            for (unsigned int j = 0; j < nbufs; j++)
+-                munmap(bufs[j].start, bufs[j].length);
+-            req.count = 0;
+-            ioctl(fd, VIDIOC_REQBUFS, &req);
+-            close(fd);
+-            error_response("snapshot: streamon failed");
+-            return;
+-        }
+-
+-        /* Dequeue one frame */
+-        memset(&dq, 0, sizeof(dq));
+-        dq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+-        dq.memory = V4L2_MEMORY_MMAP;
+-
+-        if (ioctl(fd, VIDIOC_DQBUF, &dq) < 0) {
+-            ioctl(fd, VIDIOC_STREAMOFF, &type);
+-            for (unsigned int j = 0; j < nbufs; j++)
+-                munmap(bufs[j].start, bufs[j].length);
+-            req.count = 0;
+-            ioctl(fd, VIDIOC_REQBUFS, &req);
+-            close(fd);
+-            error_response("snapshot: dqbuf failed");
+-            return;
+-        }
+-
+-        /* Stop streaming */
+-        ioctl(fd, VIDIOC_STREAMOFF, &type);
+-
+-        /* Process the frame */
+-        out_w = src_w;
+-        out_h = src_h;
+-
+-        if (is_mjpeg) {
+-            /* Data is already JPEG -- just base64 it */
+-            base64_encode((const uint8_t *)bufs[dq.index].start,
+-                           dq.bytesused, b64_buf, sizeof(b64_buf));
+-        } else {
+-            /* YUYV to JPEG via libjpeg */
+-            unsigned char *yuyv = (unsigned char *)bufs[dq.index].start;
+-            int stride = src_w * 2;
+-            struct jpeg_compress_struct cinfo;
+-            struct jpeg_error_mgr jerr;
+-            unsigned char *jpeg_buf = NULL;
+-            unsigned long jpeg_size = 0;
+-
+-            cinfo.err = jpeg_std_error(&jerr);
+-            jpeg_create_compress(&cinfo);
+-            jpeg_mem_dest(&cinfo, &jpeg_buf, &jpeg_size);
+-
+-            cinfo.image_width = src_w;
+-            cinfo.image_height = src_h;
+-            cinfo.input_components = 3;
+-            cinfo.in_color_space = JCS_YCbCr;
+-            jpeg_set_defaults(&cinfo);
+-            jpeg_set_quality(&cinfo, (int)quality, TRUE);
+-
+-            jpeg_start_compress(&cinfo, TRUE);
+-
+-            /* Convert YUYV to YCbCr planar rows for libjpeg */
+-            {
+-                JSAMPROW row = (JSAMPROW)malloc(src_w * 3);
+-                for (unsigned int y = 0; y < src_h; y++) {
+-                    unsigned char *line = yuyv + y * stride;
+-                    for (unsigned int x = 0; x < src_w; x++) {
+-                        int idx = (x / 2) * 4;
+-                        if (x % 2 == 0) {
+-                            row[x * 3]     = line[idx];      /* Y */
+-                            row[x * 3 + 1] = line[idx + 1];  /* Cb */
+-                            row[x * 3 + 2] = line[idx + 3];  /* Cr */
+-                        } else {
+-                            row[x * 3]     = line[idx + 2];  /* Y */
+-                            row[x * 3 + 1] = line[idx + 1];  /* Cb */
+-                            row[x * 3 + 2] = line[idx + 3];  /* Cr */
+-                        }
+-                    }
+-                    jpeg_write_scanlines(&cinfo, &row, 1);
+-                }
+-                free(row);
+-            }
+-
+-            jpeg_finish_compress(&cinfo);
+-            jpeg_destroy_compress(&cinfo);
+-
+-            base64_encode(jpeg_buf, jpeg_size, b64_buf, sizeof(b64_buf));
+-            free(jpeg_buf);
+-        }
+-
+-        /* Unmap */
+-        for (unsigned int j = 0; j < nbufs; j++)
+-            munmap(bufs[j].start, bufs[j].length);
+-    }
+-
+-    /* Free V4L2 buffers */
+-    req.count = 0;
+-    ioctl(fd, VIDIOC_REQBUFS, &req);
+-    close(fd);
+-
+-    printf("{\"ok\":true,\"mime\":\"image/jpeg\",\"width\":%u,\"height\":%u,\"base64\":",
+-           out_w, out_h);
+-    json_escape(stdout, b64_buf);
+-    printf("}\n");
+-    fflush(stdout);
++    const char *error = "snapshot: capture setup failed";
++    int cleanup_failed = 0, requested = 0, streaming = 0;
++    void *buffers[4] = {0}; size_t lengths[4] = {0}; unsigned mapped = 0;
++    char *encoded = NULL;
++    struct v4l2_format fmt = {0};
++    struct v4l2_requestbuffers req = {0};
++    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
++    fmt.type = type; fmt.fmt.pix.width = (unsigned)max_dim;
++    fmt.fmt.pix.height = (unsigned)max_dim * 9 / 16;
++    if (!fmt.fmt.pix.height) fmt.fmt.pix.height = 1;
++    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG; fmt.fmt.pix.field = V4L2_FIELD_NONE;
++    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) goto cleanup;
++    unsigned w = fmt.fmt.pix.width, h = fmt.fmt.pix.height;
++    error = "snapshot: unsupported or oversized MJPEG format (no YUYV fallback)";
++    if (fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG || !w || !h ||
++        w > (unsigned)max_dim || h > (unsigned)max_dim ||
++        !fmt.fmt.pix.sizeimage || fmt.fmt.pix.sizeimage > SNAPSHOT_MAX_BYTES ||
++        fmt.fmt.pix.bytesperline > SNAPSHOT_MAX_BYTES) goto cleanup;
++    req.count = 2; req.type = type; req.memory = V4L2_MEMORY_MMAP;
++    requested = 1; error = "snapshot: buffer setup failed";
++    if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 1 || req.count > 4) goto cleanup;
++    for (unsigned i = 0; i < req.count; i++) {
++        struct v4l2_buffer b = {0}; b.type = type; b.memory = req.memory; b.index = i;
++        if (ioctl(fd, VIDIOC_QUERYBUF, &b) < 0 || !b.length ||
++            b.length > SNAPSHOT_MAX_BYTES || b.length < fmt.fmt.pix.sizeimage) goto cleanup;
++        void *p = mmap(NULL, b.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, b.m.offset);
++        if (p == MAP_FAILED) goto cleanup;
++        buffers[mapped] = p; lengths[mapped++] = b.length;
++        if (ioctl(fd, VIDIOC_QBUF, &b) < 0) goto cleanup;
++    }
++    /* Even a failed STREAMON may have changed driver state: try STREAMOFF. */
++    streaming = 1;
++    if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) goto cleanup;
++    struct pollfd ready = {fd, POLLIN, 0};
++    error = "snapshot: frame wait failed or timed out";
++    if (poll(&ready, 1, 2000) != 1 || !(ready.revents & POLLIN) ||
++        (ready.revents & (POLLERR | POLLHUP | POLLNVAL))) goto cleanup;
++    struct v4l2_buffer dq = {0}; dq.type = type; dq.memory = req.memory;
++    error = "snapshot: invalid dequeued frame";
++    if (ioctl(fd, VIDIOC_DQBUF, &dq) < 0) goto cleanup;
++    /* Stop acquisition before any CPU validation or encoding. Even on failure,
++     * cleanup still attempts every mapping, buffer release and descriptor. */
++    streaming = 0;
++    if (ioctl(fd, VIDIOC_STREAMOFF, &type) < 0) {
++        cleanup_failed = 1;
++        goto cleanup;
++    }
++    if (dq.index >= mapped || !dq.bytesused || dq.bytesused > lengths[dq.index] ||
++        dq.bytesused > fmt.fmt.pix.sizeimage || (dq.flags & V4L2_BUF_FLAG_ERROR)) goto cleanup;
++    error = "snapshot: invalid, truncated or unsupported JPEG";
++    if (validate_jpeg(buffers[dq.index], dq.bytesused, w, h) < 0) goto cleanup;
++    size_t capacity = ((size_t)dq.bytesused + 2) / 3 * 4 + 1;
++    error = "snapshot: encoding allocation failed";
++    encoded = malloc(capacity);
++    if (!encoded || base64_encode(buffers[dq.index], dq.bytesused, encoded, capacity) < 0) goto cleanup;
++    error = NULL;
++cleanup:
++    if (streaming && ioctl(fd, VIDIOC_STREAMOFF, &type) < 0) cleanup_failed = 1;
++    for (unsigned i = 0; i < mapped; i++)
++        if (munmap(buffers[i], lengths[i]) < 0) cleanup_failed = 1;
++    if (requested) { req.count = 0; if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0) cleanup_failed = 1; }
++    if (close(fd) < 0) cleanup_failed = 1;
++    if (cleanup_failed) error_response("snapshot: cleanup failed; capture result withheld");
++    else if (error) error_response(error);
++    else {
++        printf("{\"ok\":true,\"mime\":\"image/jpeg\",\"width\":%u,\"height\":%u,\"base64\":", w, h);
++        json_escape(stdout, encoded); printf("}\n"); fflush(stdout);
++    }
++    free(encoded);
+ }
+ 
+ // ---- main loop ----
+@@ -1154,13 +1121,10 @@
+         } else if (strcmp(op, "procamp_range") == 0) {
+             do_procamp_range(get_field(line, "property"));
+         } else if (strcmp(op, "snapshot") == 0) {
+-            char *mx = get_field(line, "maxDim");
+-            char *q  = get_field(line, "quality");
+-            char *st = get_field(line, "settleMs");
+-            do_snapshot(get_field(line, "path"),
+-                        mx ? strtol(mx, NULL, 10) : 1024,
+-                        q  ? strtol(q, NULL, 10) : 80,
+-                        st ? strtol(st, NULL, 10) : 600);
++            long mx, q, st;
++            if (snapshot_options(line, &mx, &q, &st) < 0)
++                error_response("snapshot: invalid numeric JSON options");
++            else do_snapshot(get_field(line, "path"), mx, q, st);
+         } else {
+             char emsg[128];
+             snprintf(emsg, sizeof(emsg), "unknown op: %s", op);
+--- a/src/device/manager.ts
++++ b/src/device/manager.ts
+@@ -129,6 +129,22 @@
+  * a transport that may be talking to a device that already re-enumerated.
+  */
+ export class DeviceManager {
++  /** Linux ownership survives registry/discard paths until confirmed exit. */
++  private ownedLinuxHelpers = new Set<HelperProcess>();
++  private linuxTerminal = false;
++  private pendingLinuxFactories = new Set<Promise<HelperProcess>>();
++
++  private assertLinuxActive(): void {
++    if (process.platform === "linux" && this.linuxTerminal)
++      throw new Error("Linux DeviceManager is shut down");
++  }
++
++  private async closeOwned(helper: HelperProcess): Promise<void> {
++    if (process.platform === "linux") this.ownedLinuxHelpers.add(helper);
++    await helper.close();
++    this.ownedLinuxHelpers.delete(helper);
++  }
++
+   private registry = new Map<string, RegistryEntry>();
+   /** Lazily spawned, reused across scans until promoted into the registry. */
+   private scanHelper?: HelperProcess;
+@@ -200,6 +216,25 @@
+     private makeHelper: () => Promise<HelperProcess>,
+     opts: { arrivalBackoffMs?: number[]; log?: (msg: string) => void } = {},
+   ) {
++    if (process.platform === "linux") {
++      const factory = this.makeHelper;
++      this.makeHelper = async () => {
++        this.assertLinuxActive();
++        // Register before awaiting: shutdown must drain every started factory.
++        const pending = new Promise<HelperProcess>(resolve => resolve(factory())).then(helper => {
++          this.ownedLinuxHelpers.add(helper);
++          return helper;
++        });
++        this.pendingLinuxFactories.add(pending);
++        pending.then(
++          () => this.pendingLinuxFactories.delete(pending),
++          () => this.pendingLinuxFactories.delete(pending),
++        );
++        const helper = await pending;
++        this.assertLinuxActive();
++        return helper;
++      };
++    }
+     this.arrivalBackoffMs = opts.arrivalBackoffMs ?? [0, 400, 1200, 3000];
+     this.log = opts.log ?? ((m): void => console.error(m));
+   }
+@@ -225,7 +260,7 @@
+     this.scanHelper = undefined;
+     if (!helper) return;
+     try {
+-      await helper.close();
++      await this.closeOwned(helper);
+     } catch {
+       // best-effort — a disconnected helper's close() may itself throw
+     }
+@@ -317,6 +352,7 @@
+   }
+ 
+   private async getScanHelper(): Promise<HelperProcess> {
++    this.assertLinuxActive();
+     // A cached scan helper whose process has died must be discarded, not
+     // handed back. invalidate() only drops REGISTRY entries, so a helper that
+     // died mid-scan (before promote() moved it into the registry) would
+@@ -324,7 +360,9 @@
+     // the one path where failing fast on the transport isn't enough to recover.
+     if (this.scanHelper?.isDead) this.scanHelper = undefined;
+     if (!this.scanHelper) {
+-      this.scanHelper = await this.makeHelper();
++      const helper = await this.makeHelper();
++      this.assertLinuxActive();
++      this.scanHelper = helper;
+     }
+     return this.scanHelper;
+   }
+@@ -459,6 +497,7 @@
+ 
+   /** Move the current scratch helper into the registry under `m.serial`. */
+   private promote(m: ScanMatch): void {
++    this.assertLinuxActive();
+     // Reconnect bookkeeping BEFORE recording the bind: if we've bound this
+     // serial before, this promote is a re-bind (self-heal after a disconnect),
+     // so flag it reconnected. The very first bind of a serial is never a
+@@ -513,7 +552,7 @@
+   async invalidate(serial?: string): Promise<void> {
+     const drop = async (s: string, entry: RegistryEntry): Promise<void> => {
+       try {
+-        await entry.helper.close();
++        await this.closeOwned(entry.helper);
+       } catch {
+         // best-effort — a dead/disconnected helper's close() may itself throw
+       }
+@@ -565,7 +604,7 @@
+       // happened. (A dead helper's close() is a harmless no-op, same as in
+       // invalidate(), which has always closed-then-deleted for this reason.)
+       try {
+-        await entry.helper.close();
++        await this.closeOwned(entry.helper);
+       } catch {
+         // best-effort — a disconnected helper's close() may itself throw
+       }
+@@ -620,7 +659,7 @@
+     for (const [serial, entry] of this.registry) {
+       if (entry.path !== e.path) continue;
+       try {
+-        await entry.helper.close();
++        await this.closeOwned(entry.helper);
+       } catch {
+         // best-effort — a disconnected helper's close() may itself throw
+       }
+@@ -654,6 +693,7 @@
+    * request. A failed re-bind just leaves the next tool call to bind normally.
+    */
+   async handleCameraArrived(_e: { path: string }): Promise<void> {
++    if (process.platform === "linux" && this.linuxTerminal) return;
+     if (this.everBound.size === 0) return; // never ours — stay hands-off
+     // Something is already bound, so there is nothing to restore.
+     if (this.registry.size > 0) return;
+@@ -667,6 +707,7 @@
+       for (let i = 0; i < total; i++) {
+         const delay = this.arrivalBackoffMs[i]!;
+         if (delay > 0) await new Promise((r) => setTimeout(r, delay));
++        if (process.platform === "linux" && this.linuxTerminal) return;
+         // A tool call may have bound it while we waited — it got there first.
+         if (this.registry.size > 0) return;
+         try {
+@@ -702,10 +743,25 @@
+    * stdin EOF — so this is not what stops them leaking on a crash. It exists
+    * because the watcher is the first helper deliberately built to outlive every
+    * operation: nothing else bounds its lifetime, so an orderly stop needs
+-   * something explicit to call. Best-effort throughout; a shutdown path that can
+-   * itself throw is worse than one that leaves a process for the OS to reap.
++   * something explicit to call. Linux confirms every owned child exit and reports
++   * failures after attempting all children; other platforms remain best-effort.
+    */
+   async shutdown(): Promise<void> {
++    if (process.platform === "linux") {
++      this.linuxTerminal = true;
++      const factories = await Promise.allSettled([...this.pendingLinuxFactories]);
++      const helpers = new Set([
++        ...this.ownedLinuxHelpers,
++        ...[...this.registry.values()].map(e => e.helper),
++        ...(this.scanHelper ? [this.scanHelper] : []),
++        ...(this.watcher ? [this.watcher] : []),
++      ]);
++      const results = await Promise.allSettled([...helpers].map(h => this.closeOwned(h)));
++      this.registry.clear(); this.scanHelper = undefined; this.watcher = undefined;
++      const errors = [...factories, ...results].flatMap(r => r.status === "rejected" ? [r.reason] : []);
++      if (errors.length) throw new AggregateError(errors, "Linux helper shutdown failed");
++      return;
++    }
+     const close = async (h: HelperProcess | undefined): Promise<void> => {
+       if (!h) return;
+       try {
+--- /dev/null
++++ b/test/device/native-shutdown.test.ts
+@@ -0,0 +1,160 @@
++import { test, expect, vi } from "vitest";
++import { DeviceManager } from "../../src/device/manager.js";
++import { HelperProcess } from "../../src/transport/helper-process.js";
++import { spawn } from "node:child_process";
++
++test("Linux shutdown attempts all children and retains failed discarded owners", async () => {
++  if (process.platform !== "linux") return;
++  const stuck = {close: vi.fn(async () => { throw new Error("stuck owned child"); })};
++  const good = {close: vi.fn(async () => {})};
++  const manager = new DeviceManager(async () => stuck as unknown as HelperProcess);
++  const internal = manager as any;
++  internal.scanHelper = stuck;
++  await internal.discardScanHelper();
++  internal.watcher = good;
++  internal.registry.set("synthetic", {helper: good});
++  await expect(manager.shutdown()).rejects.toThrow("Linux helper shutdown failed");
++  expect(stuck.close).toHaveBeenCalledTimes(2);
++  expect(good.close).toHaveBeenCalledTimes(1);
++  await expect(manager.shutdown()).rejects.toThrow("Linux helper shutdown failed");
++  expect(stuck.close).toHaveBeenCalledTimes(3);
++});
++
++test("Linux shutdown observes bounded close rejection from a fake stuck child without real signals", async () => {
++  if (process.platform !== "linux") return;
++  const { EventEmitter } = await import("node:events");
++  const child = Object.assign(new EventEmitter(), {
++    pid: 123, exitCode: null, signalCode: null,
++    stdin: {end: vi.fn()}, kill: vi.fn(() => true),
++  });
++  const helper = new HelperProcess(["unused"]);
++  (helper as any).proc = child;
++  const manager = new DeviceManager(async () => helper);
++  (manager as any).scanHelper = helper;
++  await expect(manager.shutdown()).rejects.toThrow("Linux helper shutdown failed");
++  expect(child.kill.mock.calls.map(c => c[0])).toEqual(["SIGTERM", "SIGKILL"]);
++}, 5000);
++
++test("Linux manager shutdown waits for an actual owned TERM-ignoring child escalation", async () => {
++  if (process.platform !== "linux") return;
++  const child = spawn("python3", ["-u", "-c", 'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print("ready",flush=True); time.sleep(20)'], {stdio:["pipe","pipe","pipe"]});
++  try {
++    await new Promise<void>((resolve,reject) => { child.once("error",reject); child.stdout.once("data",()=>resolve()); });
++    const helper = new HelperProcess(["unused"]);
++    (helper as any).proc = child;
++    const manager = new DeviceManager(async () => helper);
++    (manager as any).scanHelper = helper;
++    await manager.shutdown();
++    expect(child.signalCode).toBe("SIGKILL");
++  } finally {
++    if (child.exitCode === null && child.signalCode === null) {
++      const exited = new Promise<void>(resolve => child.once("exit",()=>resolve()));
++      child.kill("SIGKILL"); await exited;
++    }
++  }
++}, 5000);
++
++test("Linux factory ownership survives a dead scratch helper being replaced", async () => {
++  if (process.platform !== "linux") return;
++  const old = {isDead:false, enumerate:async()=>[], close:vi.fn(async()=>{throw new Error("still owned");})};
++  const next = {isDead:false, enumerate:async()=>[], close:vi.fn(async()=>{})};
++  const factory = vi.fn().mockResolvedValueOnce(old).mockResolvedValueOnce(next);
++  const manager = new DeviceManager(factory);
++  await manager.list();old.isDead=true;await manager.list();
++  await expect(manager.shutdown()).rejects.toThrow("Linux helper shutdown failed");
++  expect(old.close).toHaveBeenCalledTimes(1);expect(next.close).toHaveBeenCalledTimes(1);
++});
++
++test("Windows/macOS manager shutdown remains best effort", async () => {
++  const descriptor = Object.getOwnPropertyDescriptor(process,"platform")!;
++  try {
++    for (const platform of ["win32","darwin"]) {
++      Object.defineProperty(process,"platform",{...descriptor,value:platform});
++      const helper = {close:vi.fn(async()=>{throw new Error("legacy close failure");})};
++      const manager = new DeviceManager(async()=>helper as unknown as HelperProcess);
++      (manager as any).scanHelper=helper;
++      await expect(manager.shutdown()).resolves.toBeUndefined();
++      expect(helper.close).toHaveBeenCalledTimes(1);
++    }
++  } finally { Object.defineProperty(process,"platform",descriptor); }
++});
++
++
++test("Linux shutdown drains pending factory before returning and rejects initiating list", async () => {
++  if (process.platform !== "linux") return;
++  let resolve!: (h: HelperProcess) => void;
++  const helper = {enumerate: vi.fn(async()=>[]), close: vi.fn(async()=>{})};
++  const factory = vi.fn(()=>new Promise<HelperProcess>(r=>{resolve=r;}));
++  const manager = new DeviceManager(factory);
++  const listing = manager.list().then(()=>"published", e=>e.message);
++  let stopped = false;
++  const stopping = manager.shutdown().then(()=>{stopped=true;});
++  await Promise.resolve(); await Promise.resolve();
++  expect(stopped).toBe(false);
++  resolve(helper as unknown as HelperProcess);
++  await stopping;
++  expect(await listing).toMatch(/shut down/);
++  expect(helper.enumerate).not.toHaveBeenCalled();
++  expect(helper.close).toHaveBeenCalledTimes(1);
++  await expect(manager.list()).rejects.toThrow(/shut down/);
++  expect(factory).toHaveBeenCalledTimes(1);
++});
++
++test("Linux pending factory rejection is aggregated and all existing closes attempted", async () => {
++  if (process.platform !== "linux") return;
++  let reject!: (e: Error) => void;
++  const manager = new DeviceManager(()=>new Promise<HelperProcess>((_,r)=>{reject=r;}));
++  const listing = manager.list().catch(()=>{});
++  const stuck = {close:vi.fn(async()=>{throw new Error("stuck");})};
++  const good = {close:vi.fn(async()=>{})};
++  (manager as any).ownedLinuxHelpers.add(stuck);
++  (manager as any).watcher=good;
++  const stopping = manager.shutdown().catch(e=>e);
++  await Promise.resolve();
++  reject(new Error("factory failed"));
++  const error = await stopping; await listing;
++  expect(error).toBeInstanceOf(AggregateError);
++  expect(error.errors.map((e: Error)=>e.message).sort()).toEqual(["factory failed","stuck"]);
++  expect(stuck.close).toHaveBeenCalledTimes(1);
++  expect(good.close).toHaveBeenCalledTimes(1);
++  expect((manager as any).ownedLinuxHelpers.has(stuck)).toBe(true);
++});
++
++test("Linux delayed arrival cannot start helpers after shutdown", async () => {
++  if (process.platform !== "linux") return;
++  vi.useFakeTimers();
++  try {
++    const factory = vi.fn(async()=>({enumerate:async()=>[],close:async()=>{}} as unknown as HelperProcess));
++    const manager = new DeviceManager(factory,{arrivalBackoffMs:[100,200],log:()=>{}});
++    (manager as any).everBound.add("synthetic");
++    const arriving = manager.handleCameraArrived({path:"synthetic"});
++    await manager.shutdown();
++    await vi.runAllTimersAsync(); await arriving;
++    const futureArrival = manager.handleCameraArrived({path:"synthetic"});
++    await vi.runAllTimersAsync(); await futureArrival;
++    await expect(manager.list()).rejects.toThrow(/shut down/);
++    expect(factory).not.toHaveBeenCalled();
++  } finally { vi.useRealTimers(); }
++});
++
++test("Linux shutdown waits for late close failure and retains that owner", async () => {
++  if (process.platform !== "linux") return;
++  let resolve!: (h: HelperProcess) => void;
++  let failClose!: (e: Error) => void;
++  const late = {close:vi.fn(()=>new Promise<void>((_,r)=>{failClose=r;}))};
++  const good = {close:vi.fn(async()=>{})};
++  const manager = new DeviceManager(()=>new Promise<HelperProcess>(r=>{resolve=r;}));
++  const listing = manager.list().catch(()=>{});
++  (manager as any).watcher=good;
++  let stopped = false;
++  const stopping = manager.shutdown().catch(e=>{stopped=true;return e;});
++  resolve(late as unknown as HelperProcess);
++  for (let i=0;i<12;i++) await Promise.resolve();
++  expect(late.close).toHaveBeenCalledTimes(1);
++  expect(good.close).toHaveBeenCalledTimes(1);
++  expect(stopped).toBe(false);
++  failClose(new Error("late stuck owner"));
++  const error = await stopping; await listing;
++  expect(error.errors.map((e: Error)=>e.message)).toEqual(["late stuck owner"]);
++  expect((manager as any).ownedLinuxHelpers.has(late)).toBe(true);
++});
+--- /dev/null
++++ b/test/native/snapshot.c
+@@ -0,0 +1,111 @@
++#define _GNU_SOURCE
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdarg.h>
++#include <string.h>
++#include <stdint.h>
++#include <stdbool.h>
++#include <unistd.h>
++#include <fcntl.h>
++#include <errno.h>
++#include <sys/ioctl.h>
++#include <sys/mman.h>
++#include <sys/stat.h>
++#include <sys/time.h>
++#include <time.h>
++#include <dirent.h>
++#include <linux/limits.h>
++#include <linux/videodev2.h>
++#include <linux/uvcvideo.h>
++#include <jpeglib.h>
++#include <poll.h>
++#include <assert.h>
++static FILE *fixture_out;
++static unsigned char *jpeg;
++static unsigned long jpeg_len;
++static int opens, closes, maps, unmaps, releases, streams, dequeues, waited;
++static int mode;
++static unsigned long fail_request;
++static unsigned requested_w, requested_h;
++static int fake_open(const char *p,int flags,...) { (void)p; (void)flags; opens++; return 42; }
++static int fake_close(int fd) { (void)fd; closes++; return mode==12?-1:0; }
++static void *fake_mmap(void *p,size_t n,int prot,int flags,int fd,off_t off) { (void)p;(void)n;(void)prot;(void)flags;(void)fd;(void)off; maps++; if(mode==18 && maps==2) { maps--;return MAP_FAILED; } return jpeg; }
++static int fake_munmap(void *p,size_t n) { (void)p;(void)n; unmaps++; return mode==11?-1:0; }
++static int fake_poll(struct pollfd *p,nfds_t n,int timeout) { (void)n;(void)timeout; p->revents=POLLIN; return mode==10?0:1; }
++static int fake_nanosleep(const struct timespec *t,struct timespec *r) { (void)r; assert(streams==0); waited+=(int)(t->tv_sec*1000+t->tv_nsec/1000000); return 0; }
++static int fake_ioctl(int fd,unsigned long op,...) {
++ (void)fd; va_list ap; va_start(ap,op); void *arg=va_arg(ap,void*); va_end(ap);
++ if(op==VIDIOC_REQBUFS && ((struct v4l2_requestbuffers*)arg)->count==0) { releases++; return mode==13?-1:0; }
++ if (op==fail_request) { if(op==VIDIOC_STREAMON)streams++;return -1; }
++ if(op==VIDIOC_S_FMT) { struct v4l2_pix_format *p=&((struct v4l2_format*)arg)->fmt.pix; requested_w=p->width;requested_h=p->height; p->width=mode==1?1920:16;p->height=16;p->sizeimage=4096; if(mode==2)p->pixelformat=V4L2_PIX_FMT_YUYV; if(mode==14)p->sizeimage=6000001;return 0; }
++ if(op==VIDIOC_REQBUFS) { ((struct v4l2_requestbuffers*)arg)->count=mode==15?5:2;return 0; }
++ if(op==VIDIOC_QUERYBUF) { if(mode==17 && ((struct v4l2_buffer*)arg)->index==1)return -1; ((struct v4l2_buffer*)arg)->length=4096;return 0; }
++ if(op==VIDIOC_QBUF)return 0;
++ if(op==VIDIOC_STREAMON){streams++;return 0;}
++ if(op==VIDIOC_STREAMOFF){streams--;return mode==16?-1:0;}
++ if(op==VIDIOC_DQBUF){struct v4l2_buffer *p=arg;dequeues++;p->index=mode==3?8:0;p->bytesused=mode==4?5000:(mode==5?jpeg_len-10:jpeg_len);p->flags=mode==6?V4L2_BUF_FLAG_ERROR:0;return 0;}
++ return -1;
++}
++static int fixture_printf(const char *fmt,...) { va_list ap;va_start(ap,fmt);int r=vfprintf(fixture_out,fmt,ap);va_end(ap);return r; }
++static int allocation_failure;
++static void *fixture_calloc(size_t n,size_t size) { assert(streams==0); return allocation_failure==1?NULL:calloc(n,size); }
++static void *fixture_malloc(size_t n) { assert(streams==0); return allocation_failure==2?NULL:malloc(n); }
++#define calloc fixture_calloc
++#define malloc fixture_malloc
++#define printf fixture_printf
++#define open fake_open
++#define close fake_close
++#define ioctl fake_ioctl
++#define mmap fake_mmap
++#define munmap fake_munmap
++#define poll fake_poll
++#define nanosleep fake_nanosleep
++#undef stdout
++#define stdout fixture_out
++#define main helper_main
++#define OBSBOT_VERSION "fixture"
++#include HELPER_SOURCE
++#undef main
++#undef printf
++#undef calloc
++#undef malloc
++#undef stdout
++static int jpeg_kind;
++static void make_jpeg(unsigned w,unsigned h) {
++ struct jpeg_compress_struct c; struct jpeg_error_mgr e;c.err=jpeg_std_error(&e);jpeg_create_compress(&c);jpeg_mem_dest(&c,&jpeg,&jpeg_len);c.image_width=w;c.image_height=h;c.input_components=3;c.in_color_space=JCS_RGB;jpeg_set_defaults(&c);
++ jpeg_scan_info scans[3]={{0}};
++ if(jpeg_kind==1){for(int i=0;i<3;i++){scans[i].comps_in_scan=1;scans[i].component_index[0]=i;scans[i].Ss=0;scans[i].Se=63;}c.scan_info=scans;c.num_scans=3;}
++ if(jpeg_kind==2)jpeg_simple_progression(&c);
++ jpeg_start_compress(&c,TRUE);unsigned char row[1280*3]={0};while(c.next_scanline<h){JSAMPROW r=row;jpeg_write_scanlines(&c,&r,1);}jpeg_finish_compress(&c);jpeg_destroy_compress(&c);
++}
++static void run(int m,int success) {
++ mode=m;opens=closes=maps=unmaps=releases=streams=dequeues=waited=0; char *out=NULL;size_t len=0;fixture_out=open_memstream(&out,&len); do_snapshot("synthetic",1280,85,600);fclose(fixture_out);
++ assert(strstr(out,success?"\"ok\":true":"\"ok\":false"));assert(opens==closes);assert(maps==unmaps);assert(streams==0);if(m!=1&&m!=2&&m!=14)assert(releases==1);if(success){assert(requested_w==1280&&requested_h==720);assert(dequeues==1);assert(waited==600);}free(out);
++}
++int main(void){
++ make_jpeg(16,16);
++ run(0,1);
++ allocation_failure=1;run(0,0);allocation_failure=2;run(0,0);allocation_failure=0;
++ int rejected[]={1,2,3,4,5,6,10,11,12,13,14,15,16,17,18};
++ for(unsigned i=0;i<sizeof(rejected)/sizeof(*rejected);i++)run(rejected[i],0);
++ unsigned long failed[]={VIDIOC_REQBUFS,VIDIOC_QUERYBUF,VIDIOC_QBUF,VIDIOC_STREAMON,VIDIOC_DQBUF};
++ for(unsigned i=0;i<sizeof(failed)/sizeof(*failed);i++){fail_request=failed[i];run(0,0);}fail_request=0;
++ char b[5];assert(base64_encode((uint8_t*)"abc",3,b,4)<0);
++ assert(base64_encode((uint8_t*)"abc",3,b,5)==4&&!strcmp(b,"YWJj"));
++ long d,q,t;
++ assert(snapshot_options("{\"op\":\"snapshot\"}",&d,&q,&t)==0&&d==1280&&q==85&&t==600);
++ const char *bad[]={"0","1281","-1","1.5","1e3","Infinity","NaN","999999999999999999999","\"1280\"","true","null","1junk","01"};
++ for(unsigned i=0;i<sizeof(bad)/sizeof(*bad);i++){char json[256];snprintf(json,sizeof(json),"{\"op\":\"snapshot\",\"maxDim\":%s}",bad[i]);assert(snapshot_options(json,&d,&q,&t)<0);}
++ assert(snapshot_options("{\"maxDim\":1,\"maxDim\":2}",&d,&q,&t)<0);
++ assert(snapshot_options("{\"quality\":101}",&d,&q,&t)<0);
++ assert(snapshot_options("{\"settleMs\":5001}",&d,&q,&t)<0);
++ assert(snapshot_options("{\"maxDim\":1,\"quality\":1,\"settleMs\":0}",&d,&q,&t)==0);
++ assert(validate_jpeg(jpeg,jpeg_len,17,16)<0);
++ unsigned char old=jpeg[2];jpeg[2]=0;assert(validate_jpeg(jpeg,jpeg_len,16,16)<0);jpeg[2]=old;
++ unsigned char *trailing=malloc(jpeg_len+3);memcpy(trailing,jpeg,jpeg_len);trailing[jpeg_len]=42;trailing[jpeg_len+1]=255;trailing[jpeg_len+2]=217;assert(validate_jpeg(trailing,jpeg_len+3,16,16)<0);free(trailing);
++ free(jpeg);jpeg=NULL;jpeg_len=0;jpeg_kind=1;make_jpeg(16,16);
++ assert(validate_jpeg(jpeg,jpeg_len,16,16)<0);
++ free(jpeg);jpeg=NULL;jpeg_len=0;jpeg_kind=2;make_jpeg(16,16);
++ assert(validate_jpeg(jpeg,jpeg_len,16,16)<0);
++ free(jpeg);puts("native snapshot fixture passed");return 0;
++}
+--- /dev/null
++++ b/test/native-snapshot.sh
+@@ -0,0 +1,8 @@
++#!/bin/sh
++set -eu
++vendor=${1:?usage: test/native-snapshot.sh VENDOR_PATH OUTPUT_DIR}
++out=${2:?explicit OUTPUT_DIR required}
++mkdir -p "$out"
++root=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
++gcc -std=c11 -g -Wall -Wextra ${NATIVE_CFLAGS:-} -DHELPER_SOURCE=\"$(realpath "$vendor/native/linux/helper.c")\" "$root/native/snapshot.c" -ljpeg -lm -o "$out/snapshot-fixture"
++"$out/snapshot-fixture"
